@@ -129,8 +129,10 @@ function esPeticionDeProgramacion(mensajes, opciones) {
     );
 }
 
-async function obtenerContextoProyecto(mensajes) {
-    const query = obtenerUltimoMensajeUsuario(mensajes).trim();
+async function obtenerContextoProyecto(mensajes, queryOriginal) {
+    const query = String(
+        queryOriginal || obtenerUltimoMensajeUsuario(mensajes)
+    ).trim();
 
     if (!query) {
         return null;
@@ -189,37 +191,46 @@ function construirMensajeDeContexto(proyecto) {
     const fuentes = selected
         .map((script, index) => {
             return [
-                `### ARCHIVO RELEVANTE ${index + 1}`,
+                `### ARCHIVO REAL ${index + 1}`,
                 `TIPO: ${script.className}`,
-                `RUTA: ${script.path}`,
+                `RUTA DEL PADRE: ${script.path}`,
                 `NOMBRE: ${script.name}`,
-                `PUNTUACIÓN: ${script.score}`,
+                `TAMAÑO: ${script.size} caracteres`,
+                `PUNTUACIÓN DE RELEVANCIA: ${script.score}`,
                 `SEÑALES: ${Array.isArray(script.signals) ? script.signals.join(", ") : ""}`,
-                "SOURCE COMPLETO:",
-                "----- INICIO SOURCE -----",
+                "SOURCE REAL DEL PROYECTO:",
+                "----- INICIO SOURCE REAL -----",
                 script.source,
-                "----- FIN SOURCE -----"
+                "----- FIN SOURCE REAL -----"
             ].join("\n");
         })
         .join("\n\n");
 
     return [
-        "CONTEXTO REAL DEL PROYECTO ROBLOX:",
-        `Se encontraron ${proyecto.totalScripts} scripts en el proyecto.`,
+        "=== CONTEXTO REAL Y CONFIABLE DEL PROYECTO ROBLOX ===",
+        `El plugin de Roblox Studio escaneó ${proyecto.totalScripts} scripts reales del proyecto.`,
+        `Se entregan ${selected.length} archivos relevantes con su SOURCE COMPLETO.`,
         "",
-        "MANIFEST DE TODOS LOS SCRIPTS:",
+        "NO DIGAS QUE NO TIENES ACCESO AL CÓDIGO.",
+        "EL CÓDIGO DE LOS ARCHIVOS RELEVANTES ESTÁ INCLUIDO ABAJO.",
+        "DEBES ANALIZARLO ANTES DE PROPONER OTRA SOLUCIÓN.",
+        "",
+        "MANIFEST COMPLETO DEL PROYECTO:",
         manifestTexto || "(sin scripts)",
         "",
-        "ARCHIVOS RELEVANTES ANALIZADOS:",
-        fuentes || "(no se identificaron archivos relevantes todavía)",
+        "ARCHIVOS RELEVANTES Y SOURCE REAL:",
+        fuentes || "(no se identificaron archivos relevantes)",
         "",
-        "REGLAS PARA USAR ESTE CONTEXTO:",
-        "- No asumas que un único script contiene todo el sistema.",
-        "- Analiza las relaciones entre LocalScripts, Scripts y ModuleScripts.",
-        "- Conserva las interfaces y dependencias existentes cuando no sea necesario cambiarlas.",
-        "- Si el cambio requiere modificar varios archivos del contexto, devuelve TODOS los archivos necesarios.",
-        "- Si un archivo relevante referencia otro archivo del manifest, considera ese archivo parte de la arquitectura antes de modificar.",
-        "- Nunca modifiques el propio plugin GeminiBridgePlugin salvo que el usuario lo pida explícitamente."
+        "REGLAS OBLIGATORIAS DEL CONTEXTO:",
+        "- El código anterior proviene directamente de Roblox Studio.",
+        "- No pidas al usuario que pegue esos archivos: ya tienes su contenido.",
+        "- No inventes una arquitectura distinta si el código real muestra otra.",
+        "- Analiza cómo se relacionan los scripts y módulos entre sí.",
+        "- Conserva la funcionalidad existente que no forma parte del cambio solicitado.",
+        "- Si el cambio requiere varios archivos, devuelve todos los archivos modificados con su SOURCE COMPLETO.",
+        "- Usa exactamente las rutas y nombres reales proporcionados.",
+        "- Si un archivo relevante referencia otro archivo del manifest, considera esa dependencia antes de modificar.",
+        "- Nunca modifiques GeminiBridgePlugin ni otros archivos del bridge salvo que el usuario lo solicite explícitamente."
     ].join("\n");
 }
 
@@ -234,8 +245,8 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
 
     const maxReintentos = Number(opciones.maxReintentos || 3);
     const maxTokens = Math.min(
-        10000,
-        Math.max(256, Number(opciones.maxTokens || 8192))
+        9000,
+        Math.max(256, Number(opciones.maxTokens || 9000))
     );
 
     const reasoningEffort =
@@ -246,7 +257,7 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         ).toLowerCase();
 
     const reasoningMaxTokens = Math.min(
-        1500,
+        1000,
         Math.max(0, maxTokens - 512)
     );
 
@@ -255,17 +266,39 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         : [];
 
     if (esPeticionDeProgramacion(mensajesFinales, opciones)) {
-        const proyecto = await obtenerContextoProyecto(mensajesFinales);
+        const queryOriginal = obtenerUltimoMensajeUsuario(mensajesFinales);
+        const proyecto = await obtenerContextoProyecto(
+            mensajesFinales,
+            queryOriginal
+        );
         const contexto = construirMensajeDeContexto(proyecto);
 
         if (contexto) {
-            mensajesFinales.push({
-                role: "user",
-                content: contexto
-            });
+            const indiceUsuario = mensajesFinales.length - 1;
+            const ultimoMensaje = mensajesFinales[indiceUsuario];
+
+            if (
+                ultimoMensaje &&
+                ultimoMensaje.role === "user" &&
+                typeof ultimoMensaje.content === "string"
+            ) {
+                ultimoMensaje.content =
+                    ultimoMensaje.content +
+                    "\n\n" +
+                    contexto;
+            } else {
+                mensajesFinales.push({
+                    role: "user",
+                    content: contexto
+                });
+            }
 
             console.log(
                 `🔎 Contexto del proyecto enviado a DeepSeek: ${proyecto.selected.length} archivos relevantes de ${proyecto.totalScripts} scripts.`
+            );
+
+            console.log(
+                "📚 DeepSeek recibirá el SOURCE real dentro de la misma instrucción."
             );
         } else {
             console.log(
