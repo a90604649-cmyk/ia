@@ -3,1202 +3,882 @@ import express from "express";
 import readline from "readline/promises";
 import { GoogleGenAI } from "@google/genai";
 import { procesarAnimacion } from "./animation.js";
+import { preguntarDeepSeek, DEEPSEEK_MODEL } from "./deepseek.js";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
+const CHAT_MODEL = process.env.GEMINI_CHAT_MODEL || "gemini-3.6-flash";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
-const CHAT_MODEL = "gemini-3.6-flash";
-const ANTIGRAVITY_AGENT = "antigravity-preview-05-2026";
+if (!GEMINI_API_KEY) {
+    console.error("❌ No se encontró GEMINI_API_KEY en el archivo .env");
+    process.exit(1);
+}
 
-const API_KEY = process.env.GEMINI_API_KEY;
-
-if (!API_KEY) {
-console.error("❌ No se encontró GEMINI_API_KEY en el archivo .env");
-process.exit(1);
+if (!NVIDIA_API_KEY) {
+    console.error("❌ No se encontró NVIDIA_API_KEY en el archivo .env");
+    process.exit(1);
 }
 
 const ai = new GoogleGenAI({
-apiKey: API_KEY
+    apiKey: GEMINI_API_KEY
 });
 
 let pendingActions = [];
-
 let r6Calibration = null;
-
 const historial = [];
 
-let antigravityInteractionId = null;
-let antigravityEnvironmentId = null;
-
 const CHAT_SYSTEM =
-"Eres un asistente experto en Roblox Studio y Luau.\n\n" +
-"Puedes conversar normalmente con el usuario.\n\n" +
-"Cuando el usuario haga una pregunta normal, responde normalmente.\n\n" +
-"Cuando el usuario pida programar, crear, corregir o modificar algo de Roblox, la tarea será enviada a Antigravity, que es el programador.\n";
+    "Eres un asistente experto en Roblox Studio y Luau.\n\n" +
+    "Puedes conversar normalmente con el usuario.\n\n" +
+    "Cuando el usuario pregunte algo que no requiere cambios de código, responde de forma clara y útil.\n\n" +
+    "Cuando el usuario quiera programar, crear, corregir o modificar Roblox, otra IA llamada DeepSeek V4 Pro será el programador.\n" +
+    "No intentes sustituir al programador en esa tarea.\n";
 
-const ANTIGRAVITY_SYSTEM =
-"Eres el programador principal de Roblox Studio y Luau.\n\n" +
+const PROGRAMMER_SYSTEM =
+    "Eres el programador principal de Roblox Studio y Luau.\n\n" +
+    "Tu trabajo es producir cambios de código completos, coherentes y listos para aplicar en Roblox Studio.\n\n" +
+    "Debes analizar la petición antes de escribir código.\n" +
+    "Respeta la arquitectura cliente-servidor de Roblox.\n" +
+    "Usa Script, LocalScript y ModuleScript correctamente.\n" +
+    "Usa APIs actuales de Roblox y evita APIs obsoletas cuando exista una alternativa actual.\n" +
+    "No uses pseudocódigo.\n" +
+    "No inventes servicios, clases, propiedades, eventos ni métodos que no existan.\n\n" +
+    "CUANDO MODIFIQUES UN SISTEMA EXISTENTE:\n" +
+    "- Devuelve el archivo completo afectado, no un parche parcial.\n" +
+    "- Conserva la funcionalidad existente que el usuario no pidió cambiar.\n" +
+    "- Si un cambio requiere varios archivos, devuelve TODOS los archivos necesarios.\n" +
+    "- Usa la misma RUTA y NOMBRE del archivo para que el bridge pueda reemplazarlo.\n" +
+    "- Si necesitas crear una carpeta, puedes representarla dentro de RUTA.\n\n" +
+    "UBICACIONES VALIDAS:\n" +
+    "ServerScriptService\n" +
+    "ReplicatedStorage\n" +
+    "StarterPlayer/StarterPlayerScripts\n" +
+    "StarterPlayer/StarterCharacterScripts\n" +
+    "StarterGui\n" +
+    "Workspace\n" +
+    "ServerStorage\n" +
+    "StarterPack\n\n" +
+    "REGLAS DE ROBLOX:\n" +
+    "- La lógica de servidor va en Script o ModuleScript del servidor.\n" +
+    "- La lógica de cliente va en LocalScript o módulos accesibles por el cliente.\n" +
+    "- Usa RemoteEvent/RemoteFunction para comunicación cliente-servidor cuando corresponda.\n" +
+    "- Valida en el servidor cualquier acción importante iniciada por el cliente.\n" +
+    "- No pongas secretos ni claves de API dentro de Luau.\n\n" +
+    "FORMATO OBLIGATORIO DE RESPUESTA:\n" +
+    "Devuelve UN SOLO objeto JSON válido. No escribas texto fuera del JSON. No uses markdown ni bloques ``` .\n\n" +
+    "Estructura exacta:\n" +
+    "{\n" +
+    "  \"reply\": \"explicación breve\",\n" +
+    "  \"actions\": [\n" +
+    "    {\n" +
+    "      \"type\": \"create_script\",\n" +
+    "      \"path\": \"ServerScriptService\",\n" +
+    "      \"name\": \"Nombre\",\n" +
+    "      \"code\": \"codigo Luau completo\"\n" +
+    "    }\n" +
+    "  ]\n" +
+    "}\n\n" +
+    "TIPOS PERMITIDOS:\n" +
+    "create_script\n" +
+    "create_local_script\n" +
+    "create_module_script\n\n" +
+    "IMPORTANTE:\n" +
+    "- El valor de code debe ser una cadena JSON válida con el código Luau completo.\n" +
+    "- Si no hace falta cambiar código, actions debe ser [].\n" +
+    "- No devuelvas archivos que no sean necesarios.\n" +
+    "- No ocultes errores. Si la petición es imposible con la información disponible, explica exactamente qué falta en reply y usa actions=[].\n";
 
-"Tu trabajo es crear sistemas completos para Roblox Studio.\n\n" +
-
-"No debes limitarte a un solo Script.\n" +
-"Si el sistema necesita varios Scripts, LocalScripts o ModuleScripts, debes crear TODOS los archivos necesarios.\n\n" +
-
-"Debes decidir correctamente dónde colocar cada archivo.\n\n" +
-
-"Ejemplos de ubicaciones válidas:\n" +
-"ServerScriptService\n" +
-"ReplicatedStorage\n" +
-"StarterPlayer/StarterPlayerScripts\n" +
-"StarterPlayer/StarterCharacterScripts\n" +
-"StarterGui\n" +
-"Workspace\n\n" +
-
-"Puedes usar carpetas dentro de esas ubicaciones.\n" +
-"Debes respetar la arquitectura cliente-servidor de Roblox.\n\n" +
-
-"Antes de generar código:\n" +
-"1. Comprende exactamente lo que pide el usuario.\n" +
-"2. Divide el sistema en todos los archivos necesarios.\n" +
-"3. Decide qué archivos son Script, LocalScript o ModuleScript.\n" +
-"4. Decide la ubicación correcta de cada archivo.\n" +
-"5. Usa APIs actuales de Roblox.\n" +
-"6. Revisa sintaxis, referencias, eventos, propiedades y lógica.\n" +
-"7. Comprueba que los scripts puedan comunicarse correctamente.\n" +
-"8. No uses pseudocódigo.\n" +
-"9. Entrega código completo y funcional.\n\n" +
-
-"IMPORTANTE:\n" +
-"Tu respuesta DEBE usar exactamente este formato.\n\n" +
-
-"RESPUESTA:\n" +
-"Explicación breve de lo que hiciste.\n\n" +
-
-"ARCHIVOS_START\n\n" +
-
-"ARCHIVO_START\n" +
-"TIPO: Script\n" +
-"RUTA: ServerScriptService\n" +
-"NOMBRE: NombreDelScript\n" +
-"CODIGO_START\n" +
-"Codigo Luau completo\n" +
-"CODIGO_END\n" +
-"ARCHIVO_END\n\n" +
-
-"ARCHIVO_START\n" +
-"TIPO: LocalScript\n" +
-"RUTA: StarterPlayer/StarterPlayerScripts\n" +
-"NOMBRE: NombreDelLocalScript\n" +
-"CODIGO_START\n" +
-"Codigo Luau completo\n" +
-"CODIGO_END\n" +
-"ARCHIVO_END\n\n" +
-
-"ARCHIVO_START\n" +
-"TIPO: ModuleScript\n" +
-"RUTA: ReplicatedStorage/Sistema\n" +
-"NOMBRE: NombreDelModuleScript\n" +
-"CODIGO_START\n" +
-"Codigo Luau completo\n" +
-"CODIGO_END\n" +
-"ARCHIVO_END\n\n" +
-
-"ARCHIVOS_END\n\n" +
-
-"Reglas:\n" +
-"- No uses markdown.\n" +
-"- No uses bloques de código.\n" +
-"- No pongas caracteres de formato alrededor del código.\n" +
-"- Cada archivo debe tener exactamente un bloque ARCHIVO_START y ARCHIVO_END.\n" +
-"- TIPO solo puede ser Script, LocalScript o ModuleScript.\n" +
-"- RUTA debe comenzar con una ubicación válida de Roblox Studio.\n" +
-"- CODIGO_START y CODIGO_END deben estar presentes siempre.\n";
+const ROUTER_SYSTEM =
+    "Eres el analista de una IA de programación para Roblox Studio y Luau.\n\n" +
+    "El usuario habla contigo en español. Tu función es convertir su petición en un brief técnico muy claro para DeepSeek V4 Pro, que será quien escribirá el código.\n\n" +
+    "Debes determinar qué quiere lograr realmente el usuario, qué comportamiento espera, qué partes de Roblox están implicadas, si es una modificación o un sistema nuevo y qué restricciones ya existen.\n\n" +
+    "No escribas el código final. No uses markdown. No inventes información que el usuario no haya dado. Si falta un dato, dilo como incertidumbre y deja que el programador tome una decisión razonable.\n\n" +
+    "Incluye:\n" +
+    "- objetivo exacto\n" +
+    "- comportamiento esperado\n" +
+    "- contexto relevante de la conversación\n" +
+    "- restricciones y nombres/rutas conocidas\n" +
+    "- riesgos o errores que el programador debería evitar\n" +
+    "- criterio de terminado\n";
 
 function esTareaDeAnimacion(mensaje) {
-const patrones = [
-"animacion",
-"animación",
-"animaciones",
-"animar",
-"anima",
-"keyframe",
-"keyframes",
-"pose",
-"poses",
-"r6",
-"movimiento"
-];
+    const patrones = [
+        "animacion",
+        "animación",
+        "animaciones",
+        "animar",
+        "anima",
+        "keyframe",
+        "keyframes",
+        "pose",
+        "poses",
+        "r6",
+        "movimiento"
+    ];
 
-const texto = mensaje.toLowerCase();
-
-return patrones.some(function(palabra) {
-    return texto.includes(palabra);
-});
-
-}
-
-function esTareaDeCodigo(mensaje) {
-const patrones = [
-"codigo",
-"código",
-"script",
-"scripts",
-"luau",
-"lua",
-"roblox",
-"studio",
-"crea",
-"crear",
-"haz",
-"hacer",
-"programa",
-"programar",
-"sistema",
-"funcion",
-"función",
-"corrige",
-"corregir",
-"modifica",
-"modificar",
-"arregla",
-"arreglar",
-"error",
-"bug",
-"localscript",
-"local script",
-"modulescript",
-"module script",
-"remoteevent",
-"remotefunction"
-];
-
-const texto = mensaje.toLowerCase();
-
-return patrones.some(function(palabra) {
-    return texto.includes(palabra);
-});
-
-}
-
-function limpiarCodigo(codigo) {
-let resultado = String(codigo || "").trim();
-
-resultado = resultado.replace(/^lua\s*/i, "");
-resultado = resultado.replace(/^luau\s*/i, "");
-resultado = resultado.replace(/^```lua\s*/i, "");
-resultado = resultado.replace(/^```luau\s*/i, "");
-resultado = resultado.replace(/^```\s*/i, "");
-resultado = resultado.replace(/\s*```$/i, "");
-
-return resultado.trim();
-
-}
-
-function extraerAntigravity(texto) {
-if (typeof texto !== "string") {
-console.error("❌ La respuesta de Antigravity no es texto.");
-return null;
-}
-
-texto = texto
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n");
-
-const respuestaInicio = texto.indexOf("RESPUESTA:");
-const archivosInicio = texto.indexOf("ARCHIVOS_START");
-const archivosFin = texto.lastIndexOf("ARCHIVOS_END");
-
-if (respuestaInicio === -1) {
-    console.error("❌ No se encontró RESPUESTA:.");
-    return null;
-}
-
-if (archivosInicio === -1) {
-    console.error("❌ No se encontró ARCHIVOS_START.");
-    return null;
-}
-
-if (archivosFin === -1) {
-    console.error("❌ No se encontró ARCHIVOS_END.");
-    return null;
-}
-
-const respuesta = texto
-    .substring(
-        respuestaInicio + "RESPUESTA:".length,
-        archivosInicio
-    )
-    .trim();
-
-const contenidoArchivos = texto
-    .substring(
-        archivosInicio + "ARCHIVOS_START".length,
-        archivosFin
-    )
-    .trim();
-
-const bloques = contenidoArchivos
-    .split("ARCHIVO_START")
-    .slice(1);
-
-if (bloques.length === 0) {
-    console.error("❌ No se encontraron archivos.");
-    return null;
-}
-
-const acciones = [];
-
-for (const bloqueCompleto of bloques) {
-    const posicionFin =
-        bloqueCompleto.indexOf("ARCHIVO_END");
-
-    if (posicionFin === -1) {
-        console.warn(
-            "⚠️ Se encontró un archivo sin ARCHIVO_END."
-        );
-        continue;
-    }
-
-    const bloque =
-        bloqueCompleto
-            .substring(0, posicionFin)
-            .trim();
-
-    const tipoInicio =
-        bloque.indexOf("TIPO:");
-
-    const rutaInicio =
-        bloque.indexOf("RUTA:");
-
-    const nombreInicio =
-        bloque.indexOf("NOMBRE:");
-
-    const codigoInicio =
-        bloque.indexOf("CODIGO_START");
-
-    const codigoFin =
-        bloque.lastIndexOf("CODIGO_END");
-
-    if (tipoInicio === -1) {
-        console.warn("⚠️ Falta TIPO.");
-        continue;
-    }
-
-    if (rutaInicio === -1) {
-        console.warn("⚠️ Falta RUTA.");
-        continue;
-    }
-
-    if (nombreInicio === -1) {
-        console.warn("⚠️ Falta NOMBRE.");
-        continue;
-    }
-
-    if (codigoInicio === -1) {
-        console.warn("⚠️ Falta CODIGO_START.");
-        continue;
-    }
-
-    if (codigoFin === -1) {
-        console.warn("⚠️ Falta CODIGO_END.");
-        continue;
-    }
-
-    if (codigoFin <= codigoInicio) {
-        console.warn(
-            "⚠️ CODIGO_END aparece antes de CODIGO_START."
-        );
-        continue;
-    }
-
-    const obtenerValorLinea =
-        function(inicio, siguiente) {
-
-            const valorFin =
-                siguiente === -1
-                    ? bloque.length
-                    : siguiente;
-
-            return bloque
-                .substring(
-                    inicio,
-                    valorFin
-                )
-                .replace(
-                    /^[^:]+:/,
-                    ""
-                )
-                .trim();
-        };
-
-    const posiciones = [
-        {
-            nombre: "tipo",
-            posicion: tipoInicio
-        },
-        {
-            nombre: "ruta",
-            posicion: rutaInicio
-        },
-        {
-            nombre: "nombre",
-            posicion: nombreInicio
-        }
-    ].sort(
-        function(a, b) {
-            return a.posicion - b.posicion;
-        }
-    );
-
-    const valores = {};
-
-    for (
-        let i = 0;
-        i < posiciones.length;
-        i++
-    ) {
-        const actual =
-            posiciones[i];
-
-        const siguiente =
-            posiciones[i + 1];
-
-        valores[actual.nombre] =
-            obtenerValorLinea(
-                actual.posicion,
-                siguiente
-                    ? siguiente.posicion
-                    : codigoInicio
-            );
-    }
-
-    const tipo =
-        valores.tipo;
-
-    const ruta =
-        valores.ruta;
-
-    const nombre =
-        valores.nombre;
-
-    const codigo =
-        limpiarCodigo(
-            bloque.substring(
-                codigoInicio +
-                "CODIGO_START".length,
-                codigoFin
-            )
-        );
-
-    if (!tipo) {
-        console.warn("⚠️ TIPO vacío.");
-        continue;
-    }
-
-    if (!ruta) {
-        console.warn(
-            "⚠️ RUTA vacía para:",
-            nombre
-        );
-        continue;
-    }
-
-    if (!nombre) {
-        console.warn("⚠️ NOMBRE vacío.");
-        continue;
-    }
-
-    if (!codigo) {
-        console.warn(
-            "⚠️ El archivo " +
-            nombre +
-            " no tiene código."
-        );
-        continue;
-    }
-
-    let actionType = null;
-
-    if (tipo === "Script") {
-        actionType = "create_script";
-    }
-
-    if (tipo === "LocalScript") {
-        actionType = "create_local_script";
-    }
-
-    if (tipo === "ModuleScript") {
-        actionType = "create_module_script";
-    }
-
-    if (!actionType) {
-        console.warn(
-            "⚠️ Tipo no permitido:",
-            tipo
-        );
-        continue;
-    }
-
-    acciones.push({
-        type: actionType,
-        name: nombre,
-        path: ruta,
-        code: codigo
+    const texto = mensaje.toLowerCase();
+    return patrones.some(function(palabra) {
+        return texto.includes(palabra);
     });
 }
 
-if (acciones.length === 0) {
-    console.error(
-        "❌ Antigravity no devolvió archivos válidos."
-    );
+function esTareaDeCodigo(mensaje) {
+    const patrones = [
+        "codigo",
+        "código",
+        "script",
+        "scripts",
+        "luau",
+        "lua",
+        "roblox",
+        "studio",
+        "crea",
+        "crear",
+        "haz",
+        "hacer",
+        "programa",
+        "programar",
+        "sistema",
+        "funcion",
+        "función",
+        "corrige",
+        "corregir",
+        "modifica",
+        "modificar",
+        "arregla",
+        "arreglar",
+        "error",
+        "bug",
+        "localscript",
+        "local script",
+        "modulescript",
+        "module script",
+        "remoteevent",
+        "remotefunction",
+        "gui",
+        "tool",
+        "remote"
+    ];
+
+    const texto = mensaje.toLowerCase();
+    return patrones.some(function(palabra) {
+        return texto.includes(palabra);
+    });
+}
+
+function agregarHistorial(role, text) {
+    if (!text) {
+        return;
+    }
+
+    historial.push({
+        role,
+        parts: [
+            {
+                text: String(text)
+            }
+        ]
+    });
+
+    if (historial.length > 30) {
+        historial.splice(0, historial.length - 30);
+    }
+}
+
+function obtenerTextoMensaje(mensaje) {
+    return mensaje?.parts
+        ?.map(function(parte) {
+            return parte?.text || "";
+        })
+        .join(" ") || "";
+}
+
+function crearContextoReciente(limite = 8) {
+    return historial
+        .slice(-limite)
+        .map(function(mensaje) {
+            const rol = mensaje.role === "user" ? "Usuario" : "Asistente";
+            const texto = obtenerTextoMensaje(mensaje);
+            return `${rol}: ${texto}`;
+        })
+        .join("\n");
+}
+
+async function hablarConGemini(mensajeUsuario) {
+    agregarHistorial("user", mensajeUsuario);
+
+    for (let intento = 1; intento <= 3; intento++) {
+        try {
+            console.log(`\n⏳ Gemini respondiendo... intento ${intento}/3`);
+
+            const response = await ai.models.generateContent({
+                model: CHAT_MODEL,
+                contents: historial,
+                config: {
+                    systemInstruction: CHAT_SYSTEM,
+                    thinkingConfig: {
+                        thinkingLevel: "low"
+                    },
+                    maxOutputTokens: 4096
+                }
+            });
+
+            const texto = response.text;
+
+            if (!texto) {
+                throw new Error("Gemini no devolvió texto.");
+            }
+
+            agregarHistorial("model", texto);
+            console.log(`\n${texto}`);
+            return texto;
+        } catch (error) {
+            const mensajeError = error instanceof Error
+                ? error.message
+                : String(error);
+
+            console.error("\n❌ Error de Gemini:");
+            console.error(mensajeError);
+
+            const temporal =
+                mensajeError.includes("429") ||
+                mensajeError.includes("500") ||
+                mensajeError.includes("502") ||
+                mensajeError.includes("503") ||
+                mensajeError.includes("504") ||
+                mensajeError.includes("UNAVAILABLE") ||
+                mensajeError.includes("RESOURCE_EXHAUSTED");
+
+            if (!temporal || intento === 3) {
+                return null;
+            }
+
+            const espera = intento * 2000;
+            await new Promise(function(resolve) {
+                setTimeout(resolve, espera);
+            });
+        }
+    }
 
     return null;
 }
 
-return {
-    reply:
-        respuesta ||
-        "Sistema generado correctamente.",
+async function prepararTareaConGemini(mensajeUsuario) {
+    agregarHistorial("user", mensajeUsuario);
 
-    actions:
-        acciones
-};
+    const contexto = crearContextoReciente(10);
+    const entrada =
+        "CONTEXTO DE CONVERSACIÓN:\n" +
+        contexto +
+        "\n\nPETICIÓN EXACTA DEL USUARIO:\n" +
+        mensajeUsuario;
 
-}
-
-async function hablarConGemini(mensajeUsuario) {
-historial.push({
-role: "user",
-parts: [
-{
-text: mensajeUsuario
-}
-]
-});
-
-if (historial.length > 20) {
-    historial.splice(
-        0,
-        historial.length - 20
-    );
-}
-
-for (
-    let intento = 1;
-    intento <= 3;
-    intento++
-) {
     try {
-        console.log(
-            "\n⏳ Procesando conversación... intento " +
-            intento +
-            "/3"
-        );
-
-        const response =
-            await ai.models.generateContent({
-                model: CHAT_MODEL,
-                contents: historial,
-
-                config: {
-                    systemInstruction: CHAT_SYSTEM,
-
-                    thinkingConfig: {
-                        thinkingLevel: "low"
-                    },
-
-                    maxOutputTokens: 2048
-                }
-            });
-
-        const texto =
-            response.text;
-
-        if (!texto) {
-            throw new Error(
-                "Gemini no devolvió texto."
-            );
-        }
-
-        historial.push({
-            role: "model",
-            parts: [
+        const response = await ai.models.generateContent({
+            model: CHAT_MODEL,
+            contents: [
                 {
-                    text: texto
+                    role: "user",
+                    parts: [
+                        {
+                            text: entrada
+                        }
+                    ]
                 }
-            ]
+            ],
+            config: {
+                systemInstruction: ROUTER_SYSTEM,
+                thinkingConfig: {
+                    thinkingLevel: "medium"
+                },
+                maxOutputTokens: 4096
+            }
         });
 
-        console.log(
-            "\n" + texto
-        );
+        const brief = response.text?.trim();
 
-        return;
+        if (!brief) {
+            throw new Error("Gemini no generó el brief técnico.");
+        }
 
+        agregarHistorial("model", `Brief técnico enviado al programador:\n${brief}`);
+
+        console.log("\n🧠 Gemini preparó la tarea para DeepSeek.");
+        console.log(brief);
+
+        return brief;
     } catch (error) {
-        const mensajeError =
-            error instanceof Error
-                ? error.message
-                : String(error);
+        const mensajeError = error instanceof Error
+            ? error.message
+            : String(error);
 
-        console.error(
-            "\n❌ Error de Gemini:"
-        );
-
-        console.error(
-            mensajeError
-        );
-
-        const temporal =
-            mensajeError.includes("429") ||
-            mensajeError.includes("500") ||
-            mensajeError.includes("503") ||
-            mensajeError.includes("UNAVAILABLE") ||
-            mensajeError.includes("RESOURCE_EXHAUSTED");
-
-        if (!temporal) {
-            return;
-        }
-
-        if (intento < 3) {
-            const espera =
-                intento * 2000;
-
-            console.log(
-                "⏳ Reintentando en " +
-                espera / 1000 +
-                " segundos..."
-            );
-
-            await new Promise(
-                function(resolve) {
-                    setTimeout(
-                        resolve,
-                        espera
-                    );
-                }
-            );
-        }
+        console.warn("⚠️ Gemini no pudo preparar el brief:", mensajeError);
+        console.warn("↪️ DeepSeek recibirá directamente la petición del usuario.");
+        return mensajeUsuario;
     }
 }
 
+function limpiarJsonMarkdown(texto) {
+    return String(texto || "")
+        .trim()
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
 }
 
-async function programarConAntigravity(
-mensajeUsuario
-) {
-const contextoReciente =
-historial
-.slice(-10)
-.map(
-function(mensaje) {
-const texto =
-mensaje.parts
-?.map(
-function(parte) {
-return (
-parte.text ||
-""
-);
+function parsearObjetoJson(texto) {
+    const limpio = limpiarJsonMarkdown(texto);
+
+    try {
+        return JSON.parse(limpio);
+    } catch {
+        // Continúa con extracción tolerante.
+    }
+
+    const primerInicio = limpio.indexOf("{");
+    const ultimoFin = limpio.lastIndexOf("}");
+
+    if (primerInicio === -1 || ultimoFin <= primerInicio) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(
+            limpio.substring(primerInicio, ultimoFin + 1)
+        );
+    } catch {
+        return null;
+    }
 }
-)
-.join(" ");
 
-                const rol =
-                    mensaje.role === "user"
-                        ? "Usuario"
-                        : "Asistente";
+function normalizarAccion(action) {
+    if (!action || typeof action !== "object") {
+        return null;
+    }
 
-                return (
-                    rol +
-                    ": " +
-                    texto
-                );
-            }
+    let type = String(action.type || "").trim();
+
+    if (type === "Script") {
+        type = "create_script";
+    }
+
+    if (type === "LocalScript") {
+        type = "create_local_script";
+    }
+
+    if (type === "ModuleScript") {
+        type = "create_module_script";
+    }
+
+    const tiposPermitidos = new Set([
+        "create_script",
+        "create_local_script",
+        "create_module_script"
+    ]);
+
+    if (!tiposPermitidos.has(type)) {
+        return null;
+    }
+
+    const name = String(action.name || "").trim();
+    const path = String(action.path || "").trim();
+    const code = String(action.code || "").trim();
+
+    const rutasPermitidas = [
+        "ServerScriptService",
+        "ReplicatedStorage",
+        "StarterPlayer/StarterPlayerScripts",
+        "StarterPlayer/StarterCharacterScripts",
+        "StarterGui",
+        "Workspace",
+        "ServerStorage",
+        "StarterPack"
+    ];
+
+    const rutaValida = rutasPermitidas.some(function(base) {
+        return path === base || path.startsWith(`${base}/`);
+    });
+
+    if (!name || !code || !rutaValida || path.includes("..")) {
+        return null;
+    }
+
+    if (name.includes("/") || name.includes("\\")) {
+        return null;
+    }
+
+    return {
+        type,
+        name,
+        path,
+        code
+    };
+}
+
+function extraerAccionesDesdeObjeto(objeto) {
+    if (!objeto || typeof objeto !== "object") {
+        return null;
+    }
+
+    if (!Array.isArray(objeto.actions)) {
+        return null;
+    }
+
+    const actions = [];
+
+    for (const action of objeto.actions) {
+        const normalizada = normalizarAccion(action);
+
+        if (normalizada) {
+            actions.push(normalizada);
+        } else if (action && Object.keys(action).length > 0) {
+            console.warn("⚠️ Acción rechazada durante validación:", action.name || "sin nombre");
+        }
+    }
+
+    const unicas = new Map();
+
+    for (const action of actions) {
+        unicas.set(`${action.path}/${action.name}`, action);
+    }
+
+    return {
+        reply: String(objeto.reply || "Sistema procesado por DeepSeek.").trim(),
+        actions: Array.from(unicas.values())
+    };
+}
+
+function extraerFormatoLegacy(texto) {
+    const normalizado = String(texto || "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n");
+
+    const respuestaInicio = normalizado.indexOf("RESPUESTA:");
+    const archivosInicio = normalizado.indexOf("ARCHIVOS_START");
+    const archivosFin = normalizado.lastIndexOf("ARCHIVOS_END");
+
+    if (
+        respuestaInicio === -1 ||
+        archivosInicio === -1 ||
+        archivosFin === -1 ||
+        archivosFin <= archivosInicio
+    ) {
+        return null;
+    }
+
+    const respuesta = normalizado
+        .substring(
+            respuestaInicio + "RESPUESTA:".length,
+            archivosInicio
         )
-        .join("\n");
+        .trim();
 
-let entrada =
-    ANTIGRAVITY_SYSTEM +
-    "\n\n";
+    const contenidoArchivos = normalizado
+        .substring(
+            archivosInicio + "ARCHIVOS_START".length,
+            archivosFin
+        )
+        .trim();
 
-if (contextoReciente) {
-    entrada +=
-        "CONTEXTO RECIENTE:\n" +
-        contextoReciente +
-        "\n\n";
+    const bloques = contenidoArchivos
+        .split("ARCHIVO_START")
+        .slice(1);
+
+    const actions = [];
+
+    for (const bloqueCompleto of bloques) {
+        const posicionFin = bloqueCompleto.indexOf("ARCHIVO_END");
+
+        if (posicionFin === -1) {
+            continue;
+        }
+
+        const bloque = bloqueCompleto
+            .substring(0, posicionFin)
+            .trim();
+
+        function valorLinea(etiqueta) {
+            const indice = bloque.indexOf(`${etiqueta}:`);
+
+            if (indice === -1) {
+                return "";
+            }
+
+            const inicio = indice + etiqueta.length + 1;
+            const fin = etiqueta === "NOMBRE"
+                ? bloque.indexOf("CODIGO_START", inicio)
+                : etiqueta === "RUTA"
+                    ? bloque.indexOf("NOMBRE:", inicio)
+                    : bloque.indexOf("RUTA:", inicio);
+
+            return bloque
+                .substring(inicio, fin === -1 ? bloque.length : fin)
+                .trim();
+        }
+
+        const tipo = valorLinea("TIPO");
+        const path = valorLinea("RUTA");
+        const name = valorLinea("NOMBRE");
+        const codigoInicio = bloque.indexOf("CODIGO_START");
+        const codigoFin = bloque.lastIndexOf("CODIGO_END");
+
+        if (codigoInicio === -1 || codigoFin <= codigoInicio) {
+            continue;
+        }
+
+        const code = bloque
+            .substring(codigoInicio + "CODIGO_START".length, codigoFin)
+            .trim();
+
+        const action = normalizarAccion({
+            type,
+            path,
+            name,
+            code
+        });
+
+        if (action) {
+            actions.push(action);
+        }
+    }
+
+    if (actions.length === 0) {
+        return null;
+    }
+
+    return {
+        reply: respuesta || "Sistema generado por DeepSeek.",
+        actions
+    };
 }
 
-entrada +=
-    "PETICIÓN ACTUAL:\n" +
-    mensajeUsuario;
+function interpretarRespuestaDeepSeek(texto) {
+    const objeto = parsearObjetoJson(texto);
+    const resultadoJson = extraerAccionesDesdeObjeto(objeto);
 
-for (
-    let intento = 1;
-    intento <= 3;
-    intento++
-) {
-    try {
-        console.log(
-            "\n🤖 Antigravity programando... intento " +
-            intento +
-            "/3"
-        );
+    if (resultadoJson) {
+        return resultadoJson;
+    }
 
-        let opciones;
+    return extraerFormatoLegacy(texto);
+}
 
-        if (
-            antigravityInteractionId &&
-            antigravityEnvironmentId
-        ) {
-            opciones = {
-                agent:
-                    ANTIGRAVITY_AGENT,
+async function programarConDeepSeek(mensajeUsuario) {
+    const brief = await prepararTareaConGemini(mensajeUsuario);
+    const contexto = crearContextoReciente(8);
 
-                previous_interaction_id:
-                    antigravityInteractionId,
+    let instruccion =
+        "PETICIÓN ORIGINAL DEL USUARIO:\n" +
+        mensajeUsuario +
+        "\n\n" +
+        "BRIEF PREPARADO POR GEMINI:\n" +
+        brief +
+        "\n\n" +
+        "CONTEXTO RECIENTE ADICIONAL:\n" +
+        contexto +
+        "\n\n" +
+        "Ahora implementa la solución. Respeta exactamente el formato JSON solicitado. Si modificas un archivo existente, devuelve su contenido completo.\n";
 
-                environment:
-                    antigravityEnvironmentId,
+    for (let intento = 1; intento <= 3; intento++) {
+        try {
+            console.log(`\n🤖 DeepSeek programando... intento ${intento}/3`);
 
-                input:
-                    mensajeUsuario,
-
-                system_instruction:
-                    ANTIGRAVITY_SYSTEM,
-
-                agent_config: {
-                    type:
-                        "antigravity",
-
-                    max_total_tokens:
-                        50000
-                },
-
-                store:
-                    true
-            };
-
-        } else {
-            opciones = {
-                agent:
-                    ANTIGRAVITY_AGENT,
-
-                input:
-                    entrada,
-
-                environment:
-                    "remote",
-
-                system_instruction:
-                    ANTIGRAVITY_SYSTEM,
-
-                agent_config: {
-                    type:
-                        "antigravity",
-
-                    max_total_tokens:
-                        50000
-                },
-
-                store:
-                    true
-            };
-        }
-
-        const interaction =
-            await ai.interactions.create(
-                opciones,
+            const texto = await preguntarDeepSeek([
                 {
-                    timeout:
-                        300000
+                    role: "system",
+                    content: PROGRAMMER_SYSTEM
+                },
+                {
+                    role: "user",
+                    content: instruccion
                 }
-            );
+            ], {
+                reasoningEffort: process.env.DEEPSEEK_REASONING || "high",
+                maxTokens: 16384,
+                temperature: 0.2,
+                maxReintentos: 3
+            });
 
-        antigravityInteractionId =
-            interaction.id;
+            console.log("\n[RESPUESTA DE DEEPSEEK]");
+            console.log(texto);
 
-        if (
-            interaction.environment_id
-        ) {
-            antigravityEnvironmentId =
-                interaction.environment_id;
-        }
+            const resultado = interpretarRespuestaDeepSeek(texto);
 
-        const texto =
-            interaction.output_text;
+            if (!resultado) {
+                console.warn("⚠️ DeepSeek no devolvió un resultado interpretable.");
 
-        if (!texto) {
-            throw new Error(
-                "Antigravity no devolvió texto."
-            );
-        }
+                instruccion =
+                    "La respuesta anterior no pudo ser interpretada.\n" +
+                    "Devuelve ÚNICAMENTE un objeto JSON válido con las propiedades reply y actions.\n" +
+                    "No uses markdown. Cada action debe tener type, path, name y code.\n\n" +
+                    "PETICIÓN ORIGINAL:\n" +
+                    mensajeUsuario +
+                    "\n\nBRIEF:\n" +
+                    brief;
 
-        console.log(
-            "\n[RESPUESTA DE ANTIGRAVITY]"
-        );
-
-        const resultado =
-            extraerAntigravity(
-                texto
-            );
-
-        if (!resultado) {
-            console.error(
-                "\n❌ No pude interpretar los archivos."
-            );
-
-            console.error(
-                "\nRespuesta recibida:"
-            );
-
-            console.error(
-                texto
-            );
-
-            return;
-        }
-
-        console.log(
-            "\n" +
-            resultado.reply
-        );
-
-        pendingActions =
-            resultado.actions;
-
-        console.log(
-            "\n[ACCIONES PARA ROBLOX]"
-        );
-
-        console.log(
-            "Archivos preparados:",
-            pendingActions.length
-        );
-
-        pendingActions.forEach(
-            function(action, indice) {
-                console.log(
-                    (
-                        indice + 1
-                    ) +
-                    ". " +
-                    action.type +
-                    " → " +
-                    action.path +
-                    "/" +
-                    action.name
-                );
+                continue;
             }
-        );
 
-        return;
+            pendingActions = resultado.actions;
 
-    } catch (error) {
-        const mensajeError =
-            error instanceof Error
+            agregarHistorial(
+                "model",
+                resultado.reply || "Sistema programado con DeepSeek."
+            );
+
+            console.log("\n✅ DeepSeek terminó.");
+            console.log(resultado.reply);
+            console.log(`📦 Acciones preparadas: ${pendingActions.length}`);
+
+            pendingActions.forEach(function(action, indice) {
+                console.log(
+                    `${indice + 1}. ${action.type} → ${action.path}/${action.name}`
+                );
+            });
+
+            return resultado;
+        } catch (error) {
+            const mensajeError = error instanceof Error
                 ? error.message
                 : String(error);
 
-        console.error(
-            "\n❌ Error de Antigravity:"
-        );
+            console.error("\n❌ Error de DeepSeek:");
+            console.error(mensajeError);
 
-        console.error(
-            mensajeError
-        );
+            if (intento === 3) {
+                return null;
+            }
 
-        const temporal =
-            mensajeError.includes("429") ||
-            mensajeError.includes("500") ||
-            mensajeError.includes("502") ||
-            mensajeError.includes("503") ||
-            mensajeError.includes("504") ||
-            mensajeError.includes("UNAVAILABLE");
-
-        if (!temporal) {
-            return;
-        }
-
-        if (intento < 3) {
-            const espera =
-                intento * 3000;
-
-            console.log(
-                "⏳ Reintentando en " +
-                espera / 1000 +
-                " segundos..."
-            );
-
-            await new Promise(
-                function(resolve) {
-                    setTimeout(
-                        resolve,
-                        espera
-                    );
-                }
-            );
+            await new Promise(function(resolve) {
+                setTimeout(resolve, intento * 2000);
+            });
         }
     }
+
+    return null;
 }
 
-}
+async function preguntar(mensajeUsuario) {
+    const texto = mensajeUsuario.trim();
 
-async function preguntar(
-mensajeUsuario
-) {
-const texto =
-mensajeUsuario.trim();
+    if (!texto) {
+        return;
+    }
 
-if (!texto) {
-    return;
-}
+    if (esTareaDeAnimacion(texto)) {
+        try {
+            console.log("\n🎞️ Enviando tarea a animation.js...");
 
-if (esTareaDeAnimacion(texto)) {
-    try {
-        console.log(
-            "\n🎞️ Enviando tarea a animation.js..."
-        );
-
-        const resultado =
-            await procesarAnimacion(
+            const resultado = await procesarAnimacion(
                 texto,
                 ai,
                 historial,
                 r6Calibration
             );
 
-        if (!resultado) {
-            console.error(
-                "❌ animation.js no devolvió ningún resultado."
+            if (!resultado) {
+                console.error("❌ animation.js no devolvió ningún resultado.");
+                return;
+            }
+
+            if (resultado.reply) {
+                console.log(`\n${resultado.reply}`);
+            }
+
+            if (
+                Array.isArray(resultado.actions) &&
+                resultado.actions.length > 0
+            ) {
+                pendingActions = resultado.actions;
+
+                console.log(
+                    `\n[ACCIONES DE ANIMACIÓN PARA ROBLOX]\nAcciones preparadas: ${pendingActions.length}`
+                );
+            }
+
+            agregarHistorial(
+                "user",
+                texto
             );
 
-            return;
-        }
-
-        if (resultado.reply) {
-            console.log(
-                "\n" +
-                resultado.reply
+            agregarHistorial(
+                "model",
+                resultado.reply || "Animación generada correctamente."
             );
-        }
-
-        if (
-            Array.isArray(
-                resultado.actions
-            ) &&
-            resultado.actions.length > 0
-        ) {
-            pendingActions =
-                resultado.actions;
-
-            console.log(
-                "\n[ACCIONES DE ANIMACIÓN PARA ROBLOX]"
-            );
-
-            console.log(
-                "Acciones preparadas:",
-                pendingActions.length
-            );
-        }
-
-    } catch (error) {
-        const mensajeError =
-            error instanceof Error
+        } catch (error) {
+            const mensajeError = error instanceof Error
                 ? error.message
                 : String(error);
 
-        console.error(
-            "\n❌ Error en animation.js:"
-        );
+            console.error("❌ Error en animation.js:", mensajeError);
+        }
 
-        console.error(
-            mensajeError
-        );
+        return;
     }
 
-    return;
+    if (esTareaDeCodigo(texto)) {
+        await programarConDeepSeek(texto);
+        return;
+    }
+
+    await hablarConGemini(texto);
 }
 
-if (esTareaDeCodigo(texto)) {
-    await programarConAntigravity(
-        texto
-    );
-} else {
-    await hablarConGemini(
-        texto
-    );
-}
-
-}
-
-app.get(
-"/",
-function(req, res) {
-res.send(
-"✅ Gemini + Antigravity Bridge funcionando."
-);
-}
-);
-
-app.post(
-"/r6-calibration",
-function(req, res) {
-try {
-if (
-!req.body ||
-typeof req.body !==
-"object"
-) {
-return res.status(400).json({
-ok: false,
-error:
-"Calibración inválida."
+app.get("/", function(_req, res) {
+    res.json({
+        ok: true,
+        service: "Roblox AI Bridge",
+        chatModel: CHAT_MODEL,
+        programmerModel: DEEPSEEK_MODEL,
+        animationSystem: "Gemini animation pipeline",
+        pendingActions: pendingActions.length
+    });
 });
-}
 
-        if (
-            req.body.rig !== "R6"
-        ) {
+app.get("/health", function(_req, res) {
+    res.json({
+        ok: true,
+        geminiConfigured: Boolean(GEMINI_API_KEY),
+        nvidiaConfigured: Boolean(NVIDIA_API_KEY),
+        chatModel: CHAT_MODEL,
+        programmerModel: DEEPSEEK_MODEL,
+        r6Calibrated: Boolean(r6Calibration),
+        pendingActions: pendingActions.length
+    });
+});
+
+app.post("/r6-calibration", function(req, res) {
+    try {
+        if (!req.body || typeof req.body !== "object") {
             return res.status(400).json({
                 ok: false,
-                error:
-                    "La calibración no corresponde a R6."
+                error: "Calibración inválida."
             });
         }
 
-        if (
-            !req.body.rigName
-        ) {
+        if (req.body.rig !== "R6") {
             return res.status(400).json({
                 ok: false,
-                error:
-                    "Falta el nombre del rig."
+                error: "La calibración no corresponde a R6."
+            });
+        }
+
+        if (!req.body.rigName) {
+            return res.status(400).json({
+                ok: false,
+                error: "Falta el nombre del rig."
             });
         }
 
         if (
             !req.body.joints ||
-            typeof req.body.joints !==
-                "object"
+            typeof req.body.joints !== "object"
         ) {
             return res.status(400).json({
                 ok: false,
-                error:
-                    "No se recibieron los joints calibrados."
+                error: "No se recibieron los joints calibrados."
             });
         }
 
-        r6Calibration =
-            req.body;
+        r6Calibration = req.body;
 
-        console.log(
-            "\n🧭 CALIBRACIÓN R6 RECIBIDA"
-        );
-
-        console.log(
-            "🎯 Rig:",
-            r6Calibration.rigName
-        );
-
+        console.log("\n🧭 CALIBRACIÓN R6 RECIBIDA");
+        console.log("🎯 Rig:", r6Calibration.rigName);
         console.log(
             "🦴 Joints:",
-            Object.keys(
-                r6Calibration.joints
-            ).length
+            Object.keys(r6Calibration.joints).length
         );
-
         console.log(
             "➡️ Frente:",
-            JSON.stringify(
-                r6Calibration.forwardWorld
-            )
+            JSON.stringify(r6Calibration.forwardWorld)
         );
-
         console.log(
             "↔️ Derecha:",
-            JSON.stringify(
-                r6Calibration.rightWorld
-            )
+            JSON.stringify(r6Calibration.rightWorld)
         );
-
         console.log(
             "⬆️ Arriba:",
-            JSON.stringify(
-                r6Calibration.upWorld
-            )
-        );
-
-        console.log(
-            "✅ Calibración R6 guardada en memoria."
+            JSON.stringify(r6Calibration.upWorld)
         );
 
         return res.json({
             ok: true,
-            message:
-                "Calibración R6 recibida correctamente."
+            message: "Calibración R6 recibida correctamente."
         });
-
     } catch (error) {
-        console.error(
-            "❌ Error procesando calibración R6:",
-            error
-        );
+        console.error("❌ Error procesando calibración R6:", error);
 
         return res.status(500).json({
             ok: false,
-            error:
-                "Error interno procesando la calibración."
+            error: "Error interno procesando la calibración."
         });
     }
-}
-
-);
-
-app.get(
-"/r6-calibration",
-function(req, res) {
-if (!r6Calibration) {
-return res.json({
-calibrated: false,
-calibration: null
 });
-}
+
+app.get("/r6-calibration", function(_req, res) {
+    if (!r6Calibration) {
+        return res.json({
+            calibrated: false,
+            calibration: null
+        });
+    }
 
     return res.json({
         calibrated: true,
-        calibration:
-            r6Calibration
+        calibration: r6Calibration
     });
-}
-
-);
-
-app.get(
-"/next",
-function(req, res) {
-const acciones =
-pendingActions;
-
-    pendingActions = [];
-
-    res.json({
-        actions:
-            acciones
-    });
-}
-
-);
-
-app.listen(
-PORT,
-function() {
-console.log(
-"================================="
-);
-
-    console.log(
-        "🤖 GEMINI + ANTIGRAVITY BRIDGE"
-    );
-
-    console.log(
-        "================================="
-    );
-
-    console.log(
-        "Servidor: http://127.0.0.1:" +
-        PORT
-    );
-
-    console.log(
-        "Chat: " +
-        CHAT_MODEL
-    );
-
-    console.log(
-        "Programador: " +
-        ANTIGRAVITY_AGENT
-    );
-
-    console.log(
-        "Animaciones: animation.js"
-    );
-
-    console.log(
-        "Calibración: R6 automática"
-    );
-
-    console.log(
-        "Chat listo."
-    );
-
-    console.log(
-        "=================================\n"
-    );
-}
-
-);
-
-const rl =
-readline.createInterface({
-input:
-process.stdin,
-
-    output:
-        process.stdout
 });
 
-console.log(
-"Escribe algo para hablar con el asistente."
-);
+app.get("/next", function(_req, res) {
+    const acciones = pendingActions;
+    pendingActions = [];
 
-console.log(
-"Las tareas de programación serán enviadas a Antigravity."
-);
+    return res.json({
+        actions: acciones
+    });
+});
 
-console.log(
-"Las tareas de animación serán enviadas a animation.js."
-);
+app.listen(PORT, function() {
+    console.log("=================================");
+    console.log("🤖 GEMINI + DEEPSEEK ROBLOX BRIDGE");
+    console.log("=================================");
+    console.log(`Servidor: http://127.0.0.1:${PORT}`);
+    console.log(`Chat: ${CHAT_MODEL}`);
+    console.log(`Programador: ${DEEPSEEK_MODEL}`);
+    console.log("Animaciones: pipeline Gemini existente");
+    console.log("Calibración: R6 automática");
+    console.log("=================================\n");
+});
 
-console.log(
-"La calibración R6 será recibida desde Roblox Studio."
-);
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+});
 
-console.log(
-"Escribe 'salir' para cerrar.\n"
-);
+console.log("Escribe algo para hablar con el asistente.");
+console.log("Las tareas de programación pasan por Gemini → DeepSeek.");
+console.log("Las tareas de animación usan el pipeline R6 existente.");
+console.log("Escribe 'salir' para cerrar.\n");
 
 while (true) {
-const mensaje =
-await rl.question(
-"Tú: "
-);
+    const mensaje = await rl.question("Tú: ");
 
-if (!mensaje.trim()) {
-    continue;
-}
+    if (!mensaje.trim()) {
+        continue;
+    }
 
-if (
-    mensaje
-        .toLowerCase()
-        .trim() ===
-    "salir"
-) {
-    console.log(
-        "Cerrando..."
-    );
+    if (mensaje.toLowerCase().trim() === "salir") {
+        console.log("Cerrando...");
+        break;
+    }
 
-    break;
-}
-
-await preguntar(
-    mensaje
-);
-
+    await preguntar(mensaje);
 }
 
 rl.close();
-
 process.exit(0);
