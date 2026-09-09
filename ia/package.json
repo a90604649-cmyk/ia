@@ -1,15 +1,24 @@
 {
   "name": "ia",
   "version": "1.0.0",
-  "description": "",
+  "description": "Roblox AI bridge with Gemini orchestration and DeepSeek V4 Pro programming",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "keywords": [],
+  "keywords": [
+    "roblox",
+    "luau",
+    "gemini",
+    "deepseek",
+    "nvidia"
+  ],
   "author": "",
   "license": "ISC",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@google/genai": "^2.21.0",
     "dotenv": "^16.0.0",
