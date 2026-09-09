@@ -129,10 +129,8 @@ function esPeticionDeProgramacion(mensajes, opciones) {
     );
 }
 
-async function obtenerContextoProyecto(mensajes, queryOriginal) {
-    const query = String(
-        queryOriginal || obtenerUltimoMensajeUsuario(mensajes)
-    ).trim();
+async function obtenerContextoProyecto(mensajes) {
+    const query = obtenerUltimoMensajeUsuario(mensajes).trim();
 
     if (!query) {
         return null;
@@ -191,46 +189,37 @@ function construirMensajeDeContexto(proyecto) {
     const fuentes = selected
         .map((script, index) => {
             return [
-                `### ARCHIVO REAL ${index + 1}`,
+                `### ARCHIVO RELEVANTE ${index + 1}`,
                 `TIPO: ${script.className}`,
-                `RUTA DEL PADRE: ${script.path}`,
+                `RUTA: ${script.path}`,
                 `NOMBRE: ${script.name}`,
-                `TAMAÑO: ${script.size} caracteres`,
-                `PUNTUACIÓN DE RELEVANCIA: ${script.score}`,
+                `PUNTUACIÓN: ${script.score}`,
                 `SEÑALES: ${Array.isArray(script.signals) ? script.signals.join(", ") : ""}`,
-                "SOURCE REAL DEL PROYECTO:",
-                "----- INICIO SOURCE REAL -----",
+                "SOURCE COMPLETO:",
+                "----- INICIO SOURCE -----",
                 script.source,
-                "----- FIN SOURCE REAL -----"
+                "----- FIN SOURCE -----"
             ].join("\n");
         })
         .join("\n\n");
 
     return [
-        "=== CONTEXTO REAL Y CONFIABLE DEL PROYECTO ROBLOX ===",
-        `El plugin de Roblox Studio escaneó ${proyecto.totalScripts} scripts reales del proyecto.`,
-        `Se entregan ${selected.length} archivos relevantes con su SOURCE COMPLETO.`,
+        "CONTEXTO REAL DEL PROYECTO ROBLOX:",
+        `Se encontraron ${proyecto.totalScripts} scripts en el proyecto.`,
         "",
-        "NO DIGAS QUE NO TIENES ACCESO AL CÓDIGO.",
-        "EL CÓDIGO DE LOS ARCHIVOS RELEVANTES ESTÁ INCLUIDO ABAJO.",
-        "DEBES ANALIZARLO ANTES DE PROPONER OTRA SOLUCIÓN.",
-        "",
-        "MANIFEST COMPLETO DEL PROYECTO:",
+        "MANIFEST DE TODOS LOS SCRIPTS:",
         manifestTexto || "(sin scripts)",
         "",
-        "ARCHIVOS RELEVANTES Y SOURCE REAL:",
-        fuentes || "(no se identificaron archivos relevantes)",
+        "ARCHIVOS RELEVANTES ANALIZADOS:",
+        fuentes || "(no se identificaron archivos relevantes todavía)",
         "",
-        "REGLAS OBLIGATORIAS DEL CONTEXTO:",
-        "- El código anterior proviene directamente de Roblox Studio.",
-        "- No pidas al usuario que pegue esos archivos: ya tienes su contenido.",
-        "- No inventes una arquitectura distinta si el código real muestra otra.",
-        "- Analiza cómo se relacionan los scripts y módulos entre sí.",
-        "- Conserva la funcionalidad existente que no forma parte del cambio solicitado.",
-        "- Si el cambio requiere varios archivos, devuelve todos los archivos modificados con su SOURCE COMPLETO.",
-        "- Usa exactamente las rutas y nombres reales proporcionados.",
-        "- Si un archivo relevante referencia otro archivo del manifest, considera esa dependencia antes de modificar.",
-        "- Nunca modifiques GeminiBridgePlugin ni otros archivos del bridge salvo que el usuario lo solicite explícitamente."
+        "REGLAS PARA USAR ESTE CONTEXTO:",
+        "- No asumas que un único script contiene todo el sistema.",
+        "- Analiza las relaciones entre LocalScripts, Scripts y ModuleScripts.",
+        "- Conserva las interfaces y dependencias existentes cuando no sea necesario cambiarlas.",
+        "- Si el cambio requiere modificar varios archivos del contexto, devuelve TODOS los archivos necesarios.",
+        "- Si un archivo relevante referencia otro archivo del manifest, considera ese archivo parte de la arquitectura antes de modificar.",
+        "- Nunca modifiques el propio plugin GeminiBridgePlugin salvo que el usuario lo pida explícitamente."
     ].join("\n");
 }
 
@@ -253,50 +242,26 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         String(
             opciones.reasoningEffort ||
             process.env.DEEPSEEK_REASONING ||
-            "medium"
+            "low"
         ).toLowerCase();
-
-    const reasoningMaxTokens = Math.min(
-        1000,
-        Math.max(0, maxTokens - 512)
-    );
 
     const mensajesFinales = Array.isArray(mensajes)
         ? mensajes.map((mensaje) => ({ ...mensaje }))
         : [];
 
     if (esPeticionDeProgramacion(mensajesFinales, opciones)) {
-        const queryOriginal = obtenerUltimoMensajeUsuario(mensajesFinales);
-        const proyecto = await obtenerContextoProyecto(
-            mensajesFinales,
-            queryOriginal
-        );
+        const proyecto = await obtenerContextoProyecto(mensajesFinales);
         const contexto = construirMensajeDeContexto(proyecto);
 
         if (contexto) {
-            const indiceUsuario = mensajesFinales.length - 1;
-            const ultimoMensaje = mensajesFinales[indiceUsuario];
-
-            if (
-                ultimoMensaje &&
-                ultimoMensaje.role === "user" &&
-                typeof ultimoMensaje.content === "string"
-            ) {
-                ultimoMensaje.content =
-                    ultimoMensaje.content +
-                    "\n\n" +
-                    contexto;
-            } else {
-                mensajesFinales.push({
-                    role: "user",
-                    content: contexto
-                });
-            }
+            mensajesFinales.push({
+                role: "user",
+                content: contexto
+            });
 
             console.log(
                 `🔎 Contexto del proyecto enviado a DeepSeek: ${proyecto.selected.length} archivos relevantes de ${proyecto.totalScripts} scripts.`
             );
-
             console.log(
                 "📚 DeepSeek recibirá el SOURCE real dentro de la misma instrucción."
             );
@@ -317,7 +282,6 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         stream: false,
         reasoning: {
             effort: reasoningEffort,
-            max_tokens: reasoningMaxTokens,
             exclude: true
         },
         response_format: {
