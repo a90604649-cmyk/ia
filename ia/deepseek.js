@@ -219,7 +219,10 @@ function construirMensajeDeContexto(proyecto) {
         "- No asumas que un único script contiene todo el sistema.",
         "- Analiza las relaciones entre LocalScripts, Scripts y ModuleScripts.",
         "- Conserva las interfaces y dependencias existentes cuando no sea necesario cambiarlas.",
-        "- Si el cambio requiere modificar varios archivos del contexto, devuelve TODOS los archivos necesarios.",
+        "- Modifica SOLAMENTE los archivos necesarios para cumplir la petición.",
+        "- Devuelve el contenido completo SOLO de los archivos que realmente cambien o se creen.",
+        "- No recrees archivos que no necesiten cambios.",
+        "- Mantén el código compacto: evita comentarios largos y explicaciones dentro del JSON.",
         "- Si un archivo relevante referencia otro archivo del manifest, considera ese archivo parte de la arquitectura antes de modificar.",
         "- Antes de cambiar código, identifica mentalmente los archivos que componen el sistema solicitado y sus relaciones.",
         "- Nunca modifiques el propio plugin GeminiBridgePlugin salvo que el usuario lo pida explícitamente."
@@ -237,8 +240,8 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
 
     const maxReintentos = Number(opciones.maxReintentos || 3);
     const maxTokens = Math.min(
-        9000,
-        Math.max(256, Number(opciones.maxTokens || 9000))
+        10000,
+        Math.max(256, Number(opciones.maxTokens || 10000))
     );
 
     const mensajesFinales = Array.isArray(mensajes)
@@ -277,7 +280,7 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         max_tokens: maxTokens,
         stream: false,
         reasoning: {
-            max_tokens: 1800,
+            max_tokens: 1200,
             exclude: true
         },
         response_format: {
