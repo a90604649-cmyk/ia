@@ -1,8 +1,13 @@
 import "dotenv/config";
 
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 const NVIDIA_STATUS_URL = "https://integrate.api.nvidia.com/v1/status";
-const DEEPSEEK_MODEL = "deepseek-ai/deepseek-v4-pro-0813";
+
+const OPENROUTER_MODEL =
+    process.env.OPENROUTER_MODEL || "deepseek/deepseek-v4-pro-0813";
+const NVIDIA_MODEL =
+    process.env.NVIDIA_MODEL || "deepseek-ai/deepseek-v4-pro-0813";
 
 function sleep(ms) {
     return new Promise(function(resolve) {
@@ -12,7 +17,7 @@ function sleep(ms) {
 
 function obtenerErrorTexto(data) {
     if (!data) {
-        return "Error desconocido de NVIDIA.";
+        return "Error desconocido del proveedor de IA.";
     }
 
     if (typeof data === "string") {
@@ -48,7 +53,8 @@ function esReintentable(status, mensaje) {
         texto.includes("temporarily") ||
         texto.includes("unavailable") ||
         texto.includes("high demand") ||
-        texto.includes("rate limit")
+        texto.includes("rate limit") ||
+        texto.includes("overloaded")
     );
 }
 
@@ -82,7 +88,7 @@ async function fetchJson(url, options, timeoutMs) {
     }
 }
 
-async function esperarResultado(requestId, apiKey) {
+async function esperarResultadoNvidia(requestId, apiKey) {
     const maxIntentos = 60;
 
     for (let intento = 1; intento <= maxIntentos; intento++) {
@@ -106,7 +112,7 @@ async function esperarResultado(requestId, apiKey) {
 
         if (resultado.response.status === 202) {
             console.log(
-                `⏳ DeepSeek todavía está procesando (${intento}/${maxIntentos})...`
+                `⏳ NVIDIA todavía está procesando (${intento}/${maxIntentos})...`
             );
             continue;
         }
@@ -120,21 +126,109 @@ async function esperarResultado(requestId, apiKey) {
     throw new Error("NVIDIA tardó demasiado en devolver el resultado.");
 }
 
-export async function preguntarDeepSeek(mensajes, opciones = {}) {
-    const apiKey = process.env.NVIDIA_API_KEY;
+async function preguntarOpenRouter(mensajes, opciones, apiKey) {
+    const maxTokens = Math.min(
+        Number(opciones.maxTokens || 16384),
+        16384
+    );
 
-    if (!apiKey) {
-        throw new Error("No se encontró NVIDIA_API_KEY en el archivo .env");
+    const body = {
+        model: opciones.model || OPENROUTER_MODEL,
+        messages: mensajes,
+        temperature: Number.isFinite(Number(opciones.temperature))
+            ? Number(opciones.temperature)
+            : 0.2,
+        max_tokens: Math.max(256, maxTokens),
+        stream: false
+    };
+
+    const headers = {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Title": "Roblox AI Bridge"
+    };
+
+    if (process.env.OPENROUTER_SITE_URL) {
+        headers["HTTP-Referer"] = process.env.OPENROUTER_SITE_URL;
     }
 
     const maxReintentos = Number(opciones.maxReintentos || 3);
+
+    for (let intento = 1; intento <= maxReintentos; intento++) {
+        try {
+            const resultado = await fetchJson(
+                OPENROUTER_URL,
+                {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify(body)
+                },
+                300000
+            );
+
+            if (!resultado.response.ok) {
+                const mensaje = obtenerErrorTexto(resultado.data);
+
+                if (
+                    intento < maxReintentos &&
+                    esReintentable(resultado.response.status, mensaje)
+                ) {
+                    const espera = intento * 2500;
+
+                    console.warn(
+                        `⚠️ OpenRouter ${resultado.response.status}. Reintentando en ${espera / 1000}s...`
+                    );
+
+                    await sleep(espera);
+                    continue;
+                }
+
+                throw new Error(
+                    `OpenRouter ${resultado.response.status}: ${mensaje}`
+                );
+            }
+
+            return extraerTexto(resultado.data);
+        } catch (error) {
+            const mensaje =
+                error instanceof Error
+                    ? error.message
+                    : String(error);
+
+            const abortado =
+                mensaje.toLowerCase().includes("aborted") ||
+                mensaje.toLowerCase().includes("aborterror");
+
+            if (
+                intento < maxReintentos &&
+                (abortado || mensaje.includes("fetch failed"))
+            ) {
+                const espera = intento * 2500;
+
+                console.warn(
+                    `⚠️ Error temporal de OpenRouter. Reintentando en ${espera / 1000}s...`
+                );
+
+                await sleep(espera);
+                continue;
+            }
+
+            throw error;
+        }
+    }
+
+    throw new Error("OpenRouter agotó todos los reintentos.");
+}
+
+async function preguntarNvidia(mensajes, opciones, apiKey) {
     const maxTokens = Math.min(
         16384,
         Math.max(256, Number(opciones.maxTokens || 16384))
     );
 
     const body = {
-        model: DEEPSEEK_MODEL,
+        model: opciones.model || NVIDIA_MODEL,
         messages: mensajes,
         temperature: Number.isFinite(Number(opciones.temperature))
             ? Number(opciones.temperature)
@@ -144,6 +238,8 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         reasoning_effort: opciones.reasoningEffort || "high",
         stream: false
     };
+
+    const maxReintentos = Number(opciones.maxReintentos || 3);
 
     for (let intento = 1; intento <= maxReintentos; intento++) {
         try {
@@ -171,7 +267,7 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
                 }
 
                 return extraerTexto(
-                    await esperarResultado(requestId, apiKey)
+                    await esperarResultadoNvidia(requestId, apiKey)
                 );
             }
 
@@ -185,7 +281,7 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
                     const espera = intento * 2500;
 
                     console.warn(
-                        `⚠️ DeepSeek/NVIDIA ${resultado.response.status}. Reintentando en ${espera / 1000}s...`
+                        `⚠️ NVIDIA ${resultado.response.status}. Reintentando en ${espera / 1000}s...`
                     );
 
                     await sleep(espera);
@@ -223,7 +319,7 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
                 const espera = intento * 2500;
 
                 console.warn(
-                    `⚠️ Error temporal de DeepSeek. Reintentando en ${espera / 1000}s...`
+                    `⚠️ Error temporal de NVIDIA. Reintentando en ${espera / 1000}s...`
                 );
 
                 await sleep(espera);
@@ -234,7 +330,36 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         }
     }
 
-    throw new Error("DeepSeek agotó todos los reintentos.");
+    throw new Error("NVIDIA agotó todos los reintentos.");
+}
+
+export async function preguntarDeepSeek(mensajes, opciones = {}) {
+    const openRouterApiKey = process.env.OPENROUTER_API_KEY;
+    const nvidiaApiKey = process.env.NVIDIA_API_KEY;
+
+    if (openRouterApiKey) {
+        return preguntarOpenRouter(
+            mensajes,
+            opciones,
+            openRouterApiKey
+        );
+    }
+
+    if (nvidiaApiKey) {
+        console.warn(
+            "⚠️ OPENROUTER_API_KEY no está configurada. Usando NVIDIA como proveedor de respaldo."
+        );
+
+        return preguntarNvidia(
+            mensajes,
+            opciones,
+            nvidiaApiKey
+        );
+    }
+
+    throw new Error(
+        "No se encontró OPENROUTER_API_KEY ni NVIDIA_API_KEY en el archivo .env"
+    );
 }
 
 function extraerTexto(data) {
@@ -246,11 +371,12 @@ function extraerTexto(data) {
 
     if (typeof texto !== "string" || !texto.trim()) {
         throw new Error(
-            `DeepSeek no devolvió contenido válido: ${obtenerErrorTexto(data)}`
+            `El proveedor no devolvió contenido válido: ${obtenerErrorTexto(data)}`
         );
     }
 
     return texto.trim();
 }
 
-export { DEEPSEEK_MODEL };
+export const DEEPSEEK_MODEL = OPENROUTER_MODEL;
+export { OPENROUTER_MODEL, NVIDIA_MODEL };
