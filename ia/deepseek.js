@@ -189,8 +189,7 @@ function construirMensajeDeContexto(proyecto) {
     const fuentes = selected
         .map((script, index) => {
             return [
-                `
-### ARCHIVO RELEVANTE ${index + 1}`,
+                `### ARCHIVO RELEVANTE ${index + 1}`,
                 `TIPO: ${script.className}`,
                 `RUTA: ${script.path}`,
                 `NOMBRE: ${script.name}`,
@@ -239,6 +238,18 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         Math.max(256, Number(opciones.maxTokens || 8192))
     );
 
+    const reasoningEffort =
+        String(
+            opciones.reasoningEffort ||
+            process.env.DEEPSEEK_REASONING ||
+            "medium"
+        ).toLowerCase();
+
+    const reasoningMaxTokens = Math.min(
+        1500,
+        Math.max(0, maxTokens - 512)
+    );
+
     const mensajesFinales = Array.isArray(mensajes)
         ? mensajes.map((mensaje) => ({ ...mensaje }))
         : [];
@@ -270,7 +281,15 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
             ? Number(opciones.temperature)
             : 0.2,
         max_tokens: maxTokens,
-        stream: false
+        stream: false,
+        reasoning: {
+            effort: reasoningEffort,
+            max_tokens: reasoningMaxTokens,
+            exclude: true
+        },
+        response_format: {
+            type: "json_object"
+        }
     };
 
     const headers = {
@@ -358,6 +377,16 @@ function extraerTexto(data) {
         "";
 
     if (typeof texto !== "string" || !texto.trim()) {
+        const finishReason = data?.choices?.[0]?.finish_reason;
+        const usage = data?.usage?.completion_tokens_details;
+
+        if (finishReason === "length") {
+            throw new Error(
+                "DeepSeek agotó el límite de salida antes de terminar el JSON. " +
+                `Razonamiento usado: ${usage?.reasoning_tokens ?? "desconocido"} tokens.`
+            );
+        }
+
         throw new Error(
             `OpenRouter no devolvió contenido válido: ${obtenerErrorTexto(data)}`
         );
