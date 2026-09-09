@@ -4,14 +4,14 @@
   "description": "Roblox AI bridge with Gemini orchestration and DeepSeek V4 Pro programming",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node start.js"
   },
   "keywords": [
     "roblox",
     "luau",
     "gemini",
     "deepseek",
-    "nvidia"
+    "openrouter"
   ],
   "author": "",
   "license": "ISC",
