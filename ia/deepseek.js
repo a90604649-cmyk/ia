@@ -240,8 +240,8 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
 
     const maxReintentos = Number(opciones.maxReintentos || 3);
     const maxTokens = Math.min(
-        10000,
-        Math.max(256, Number(opciones.maxTokens || 10000))
+        2800,
+        Math.max(256, Number(opciones.maxTokens || 2800))
     );
 
     const mensajesFinales = Array.isArray(mensajes)
@@ -280,7 +280,7 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         max_tokens: maxTokens,
         stream: false,
         reasoning: {
-            max_tokens: 1200,
+            max_tokens: 400,
             exclude: true
         },
         response_format: {
