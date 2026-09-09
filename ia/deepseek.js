@@ -214,11 +214,14 @@ function construirMensajeDeContexto(proyecto) {
         fuentes || "(no se identificaron archivos relevantes todavía)",
         "",
         "REGLAS PARA USAR ESTE CONTEXTO:",
+        "- El SOURCE incluido arriba es código REAL del proyecto actual, obtenido directamente desde Roblox Studio.",
+        "- No digas que no tienes acceso al código ni pidas al usuario que lo comparta si aquí se incluye SOURCE.",
         "- No asumas que un único script contiene todo el sistema.",
         "- Analiza las relaciones entre LocalScripts, Scripts y ModuleScripts.",
         "- Conserva las interfaces y dependencias existentes cuando no sea necesario cambiarlas.",
         "- Si el cambio requiere modificar varios archivos del contexto, devuelve TODOS los archivos necesarios.",
         "- Si un archivo relevante referencia otro archivo del manifest, considera ese archivo parte de la arquitectura antes de modificar.",
+        "- Antes de cambiar código, identifica mentalmente los archivos que componen el sistema solicitado y sus relaciones.",
         "- Nunca modifiques el propio plugin GeminiBridgePlugin salvo que el usuario lo pida explícitamente."
     ].join("\n");
 }
@@ -237,13 +240,6 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         9000,
         Math.max(256, Number(opciones.maxTokens || 9000))
     );
-
-    const reasoningEffort =
-        String(
-            opciones.reasoningEffort ||
-            process.env.DEEPSEEK_REASONING ||
-            "low"
-        ).toLowerCase();
 
     const mensajesFinales = Array.isArray(mensajes)
         ? mensajes.map((mensaje) => ({ ...mensaje }))
@@ -281,7 +277,7 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         max_tokens: maxTokens,
         stream: false,
         reasoning: {
-            effort: reasoningEffort,
+            max_tokens: 1800,
             exclude: true
         },
         response_format: {
