@@ -256,27 +256,18 @@ function esJsonInterpretable(texto) {
     }
 }
 
-function crearRespuestaError(mensaje) {
-    return JSON.stringify({
-        reply: String(mensaje || "No se pudo completar la petición."),
-        actions: []
-    });
-}
-
 export async function preguntarDeepSeek(mensajes, opciones = {}) {
     const apiKey = process.env.OPENROUTER_API_KEY;
 
     if (!apiKey) {
-        console.error("❌ No se encontró OPENROUTER_API_KEY en el archivo .env");
-        return crearRespuestaError(
-            "No se encontró OPENROUTER_API_KEY en el archivo .env."
+        throw new Error(
+            "No se encontró OPENROUTER_API_KEY en el archivo .env"
         );
     }
 
-    const maxReintentos = Math.min(
-        2,
-        Math.max(1, Number(opciones.maxReintentos || 2))
-    );
+    // Los reintentos se controlan exclusivamente desde server.js.
+    // Esto evita solicitudes duplicadas/in-flight hacia OpenRouter.
+    const maxReintentos = 1;
 
     const maxTokens = Math.min(
         2800,
@@ -358,9 +349,8 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
                 const mensaje = obtenerErrorTexto(resultado.data);
 
                 if (resultado.response.status === 402) {
-                    console.error(`💳 OpenRouter 402: ${mensaje}`);
-                    return crearRespuestaError(
-                        `OpenRouter rechazó la petición por crédito insuficiente. ${mensaje}`
+                    throw new Error(
+                        `OpenRouter 402: ${mensaje}`
                     );
                 }
 
@@ -378,11 +368,7 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
                     continue;
                 }
 
-                console.error(
-                    `❌ OpenRouter ${resultado.response.status}: ${mensaje}`
-                );
-
-                return crearRespuestaError(
+                throw new Error(
                     `OpenRouter ${resultado.response.status}: ${mensaje}`
                 );
             }
@@ -390,62 +376,18 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
             const texto = extraerTexto(resultado.data);
 
             if (!esJsonInterpretable(texto)) {
-                console.warn(
-                    "⚠️ DeepSeek devolvió una respuesta que no es JSON interpretable."
-                );
-
-                if (intento < maxReintentos) {
-                    const espera = 3000;
-
-                    console.warn(
-                        `↪️ Reintentando internamente en ${espera / 1000}s...`
-                    );
-
-                    await sleep(espera);
-                    continue;
-                }
-
-                return crearRespuestaError(
+                throw new Error(
                     "DeepSeek terminó la petición, pero la respuesta no contenía el JSON esperado."
                 );
             }
 
             return texto.trim();
         } catch (error) {
-            const mensaje =
-                error instanceof Error
-                    ? error.message
-                    : String(error);
-
-            const abortado =
-                mensaje.toLowerCase().includes("aborted") ||
-                mensaje.toLowerCase().includes("aborterror");
-
-            if (
-                intento < maxReintentos &&
-                (abortado || mensaje.toLowerCase().includes("fetch failed"))
-            ) {
-                const espera = Math.max(5000, intento * 5000);
-
-                console.warn(
-                    `⚠️ Error temporal de OpenRouter. Esperando ${espera / 1000}s antes de reintentar...`
-                );
-
-                await sleep(espera);
-                continue;
-            }
-
-            console.error("❌ Error de OpenRouter:", mensaje);
-
-            return crearRespuestaError(
-                `No se pudo completar la petición a OpenRouter: ${mensaje}`
-            );
+            throw error;
         }
     }
 
-    return crearRespuestaError(
-        "OpenRouter agotó los reintentos internos."
-    );
+    throw new Error("OpenRouter agotó los reintentos internos.");
 }
 
 function extraerTexto(data) {
