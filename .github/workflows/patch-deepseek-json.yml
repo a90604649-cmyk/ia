@@ -1,0 +1,232 @@
+name: Fix DeepSeek JSON parser
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-deepseek:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch deepseek.js
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('ia/deepseek.js')
+          text = path.read_text(encoding='utf-8')
+
+          old_block = '''function limpiarJsonMarkdown(texto) {
+              return String(texto || "")
+                  .trim()
+                  .replace(/^```json\\s*/i, "")
+                  .replace(/^```\\s*/i, "")
+                  .replace(/\\s*```$/i, "")
+                  .trim();
+          }
+
+          function esJsonInterpretable(texto) {
+              const limpio = limpiarJsonMarkdown(texto);
+
+              try {
+                  const objeto = JSON.parse(limpio);
+
+                  return (
+                      objeto &&
+                      typeof objeto === "object" &&
+                      Array.isArray(objeto.actions) &&
+                      typeof objeto.reply !== "undefined"
+                  );
+              } catch {
+                  return false;
+              }
+          }'''
+
+          new_block = '''function limpiarJsonMarkdown(texto) {
+              return String(texto || "")
+                  .trim()
+                  .replace(/^```json\\s*/i, "")
+                  .replace(/^```\\s*/i, "")
+                  .replace(/\\s*```$/i, "")
+                  .trim();
+          }
+
+          function extraerObjetoJson(texto) {
+              const limpio = limpiarJsonMarkdown(texto);
+              const inicio = limpio.indexOf("{");
+
+              if (inicio === -1) {
+                  return null;
+              }
+
+              let profundidad = 0;
+              let dentroDeString = false;
+              let escapado = false;
+
+              for (let i = inicio; i < limpio.length; i++) {
+                  const caracter = limpio[i];
+
+                  if (dentroDeString) {
+                      if (escapado) {
+                          escapado = false;
+                          continue;
+                      }
+
+                      if (caracter === "\\\\") {
+                          escapado = true;
+                          continue;
+                      }
+
+                      if (caracter === '"') {
+                          dentroDeString = false;
+                      }
+
+                      continue;
+                  }
+
+                  if (caracter === '"') {
+                      dentroDeString = true;
+                      continue;
+                  }
+
+                  if (caracter === "{") {
+                      profundidad += 1;
+                      continue;
+                  }
+
+                  if (caracter === "}") {
+                      profundidad -= 1;
+
+                      if (profundidad === 0) {
+                          return limpio.slice(inicio, i + 1);
+                      }
+                  }
+              }
+
+              return null;
+          }
+
+          function parsearJsonRobusto(texto) {
+              const limpio = limpiarJsonMarkdown(texto);
+
+              try {
+                  return JSON.parse(limpio);
+              } catch {
+                  const objeto = extraerObjetoJson(limpio);
+
+                  if (!objeto) {
+                      return null;
+                  }
+
+                  try {
+                      return JSON.parse(objeto);
+                  } catch {
+                      return null;
+                  }
+              }
+          }
+
+          function normalizarJsonRespuesta(texto) {
+              const objeto = parsearJsonRobusto(texto);
+
+              if (
+                  !objeto ||
+                  typeof objeto !== "object" ||
+                  Array.isArray(objeto) ||
+                  !Array.isArray(objeto.actions) ||
+                  typeof objeto.reply === "undefined"
+              ) {
+                  return null;
+              }
+
+              return JSON.stringify(objeto);
+          }
+
+          function esJsonInterpretable(texto) {
+              return normalizarJsonRespuesta(texto) !== null;
+          }'''
+
+          if old_block not in text:
+              raise SystemExit('No se encontró el bloque del parser JSON esperado en deepseek.js')
+
+          text = text.replace(old_block, new_block, 1)
+
+          old_response = '''            const texto = extraerTexto(resultado.data);
+
+            if (!esJsonInterpretable(texto)) {
+                ultimoError = new Error(
+                    "DeepSeek terminó la petición, pero la respuesta no contenía el JSON esperado."
+                );
+
+                console.warn(
+                    `⚠️ La clave ${numeroClave} recibió una respuesta no interpretable.`
+                );
+
+                if (indiceClave < claves.length - 1) {
+                    console.warn("↪️ Probando la siguiente clave de OpenRouter...");
+                    await sleep(500);
+                    continue;
+                }
+
+                throw ultimoError;
+            }
+
+            console.log(
+                `✅ DeepSeek respondió correctamente usando la clave ${numeroClave}/${claves.length}.`
+            );
+
+            return texto.trim();'''
+
+          new_response = '''            const texto = extraerTexto(resultado.data);
+            const jsonNormalizado = normalizarJsonRespuesta(texto);
+
+            if (!jsonNormalizado) {
+                ultimoError = new Error(
+                    "DeepSeek terminó la petición, pero la respuesta no contenía un JSON válido con reply y actions."
+                );
+
+                console.warn(
+                    `⚠️ La clave ${numeroClave} recibió una respuesta no interpretable.`
+                );
+
+                console.warn(
+                    "🧾 Inicio de la respuesta recibida:",
+                    String(texto).slice(0, 500).replace(/\\s+/g, " ")
+                );
+
+                if (indiceClave < claves.length - 1) {
+                    console.warn("↪️ Probando la siguiente clave de OpenRouter...");
+                    await sleep(500);
+                    continue;
+                }
+
+                throw ultimoError;
+            }
+
+            console.log(
+                `✅ DeepSeek respondió correctamente usando la clave ${numeroClave}/${claves.length}.`
+            );
+
+            return jsonNormalizado;'''
+
+          if old_response not in text:
+              raise SystemExit('No se encontró el bloque de respuesta de DeepSeek esperado')
+
+          text = text.replace(old_response, new_response, 1)
+          path.write_text(text, encoding='utf-8')
+
+      - name: Commit patch and remove workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ia/deepseek.js
+          git rm .github/workflows/patch-deepseek-json.yml
+          git commit -m "Robust DeepSeek JSON response parsing"
+          git push
