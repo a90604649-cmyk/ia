@@ -1,0 +1,212 @@
+name: Fix CRUD action selection
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-server:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch server.js
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          path = Path('ia/server.js')
+          text = path.read_text(encoding='utf-8')
+
+          marker = 'async function programarConDeepSeek(mensajeUsuario) {'
+
+          helper = r'''async function ajustarAccionesCRUDPorProyecto(resultado) {
+              if (!resultado || !Array.isArray(resultado.actions)) {
+                  return resultado;
+              }
+
+              try {
+                  const contextPort = Number(process.env.PROJECT_CONTEXT_PORT || 3001);
+                  const response = await fetch(
+                      `http://127.0.0.1:${contextPort}/project-summary`
+                  );
+
+                  if (!response.ok) {
+                      return resultado;
+                  }
+
+                  const proyecto = await response.json();
+                  const manifest = Array.isArray(proyecto.manifest)
+                      ? proyecto.manifest
+                      : [];
+
+                  const existentes = new Map();
+
+                  for (const script of manifest) {
+                      if (!script?.path || !script?.name || !script?.className) {
+                          continue;
+                      }
+
+                      existentes.set(
+                          `${script.path}/${script.name}`,
+                          script
+                      );
+                  }
+
+                  const tipoUpdatePorClase = {
+                      Script: 'update_script',
+                      LocalScript: 'update_local_script',
+                      ModuleScript: 'update_module_script'
+                  };
+
+                  const tipoCreatePorClase = {
+                      Script: 'create_script',
+                      LocalScript: 'create_local_script',
+                      ModuleScript: 'create_module_script'
+                  };
+
+                  let corregidas = 0;
+
+                  const actions = resultado.actions.map((action) => {
+                      if (!action || !action.path || !action.name) {
+                          return action;
+                      }
+
+                      if (action.type === 'create_folder' || action.type === 'delete_folder') {
+                          return action;
+                      }
+
+                      const key = `${action.path}/${action.name}`;
+                      const existente = existentes.get(key);
+
+                      if (!existente) {
+                          if (
+                              (action.type === 'update_script' ||
+                                  action.type === 'update_local_script' ||
+                                  action.type === 'update_module_script') &&
+                              tipoCreatePorClase[action.className]
+                          ) {
+                              corregidas += 1;
+                              console.log(
+                                  `🔧 CRUD: ${key} no existe; update_* → ${tipoCreatePorClase[action.className]}.`
+                              );
+                              return {
+                                  ...action,
+                                  type: tipoCreatePorClase[action.className]
+                              };
+                          }
+
+                          return action;
+                      }
+
+                      const claseReal = existente.className;
+                      const tipoUpdate = tipoUpdatePorClase[claseReal];
+
+                      if (!tipoUpdate) {
+                          return action;
+                      }
+
+                      const esCreate =
+                          action.type === 'create_script' ||
+                          action.type === 'create_local_script' ||
+                          action.type === 'create_module_script';
+
+                      const esUpdate =
+                          action.type === 'update_script' ||
+                          action.type === 'update_local_script' ||
+                          action.type === 'update_module_script';
+
+                      if (esCreate && action.className === claseReal) {
+                          corregidas += 1;
+                          console.log(
+                              `🔧 CRUD: ${key} ya existe como ${claseReal}; create_* → ${tipoUpdate}.`
+                          );
+                          return {
+                              ...action,
+                              type: tipoUpdate,
+                              className: claseReal
+                          };
+                      }
+
+                      if (esUpdate && action.className && action.className !== claseReal) {
+                          corregidas += 1;
+                          console.log(
+                              `🔧 CRUD: ${key} tiene ClassName real ${claseReal}; corrigiendo ${action.type} → ${tipoUpdate}.`
+                          );
+                          return {
+                              ...action,
+                              type: tipoUpdate,
+                              className: claseReal
+                          };
+                      }
+
+                      return action;
+                  });
+
+                  if (corregidas > 0) {
+                      console.log(
+                          `✅ CRUD: ${corregidas} acción(es) ajustada(s) usando el manifest real del proyecto.`
+                      );
+                  }
+
+                  return {
+                      ...resultado,
+                      actions
+                  };
+              } catch (error) {
+                  console.warn(
+                      '⚠️ No se pudo validar CRUD contra Project Context:',
+                      error instanceof Error ? error.message : String(error)
+                  );
+                  return resultado;
+              }
+          }
+
+'''
+
+          if 'async function ajustarAccionesCRUDPorProyecto(' not in text:
+              if marker not in text:
+                  raise SystemExit('No se encontró el punto de inserción en ia/server.js')
+              text = text.replace(marker, helper + marker, 1)
+
+          old = '            pendingActions = resultado.actions;'
+          new = '            resultado = await ajustarAccionesCRUDPorProyecto(resultado);\n\n            pendingActions = resultado.actions;'
+
+          if old not in text:
+              raise SystemExit('No se encontró pendingActions en ia/server.js')
+          if new not in text:
+              text = text.replace(old, new, 1)
+
+          extra_prompt = (
+              'ANTES DE CREAR CADA ACTION: compara obligatoriamente path + name contra el MANIFEST real. '
+              'Si la coincidencia existe y el ClassName coincide, DEBES usar update_* y NUNCA create_*. '
+              'Solo usa create_* cuando el archivo no exista. Si el usuario pide modificar un sistema existente, '
+              'el resultado debe contener update_* para cada archivo existente que cambie.\n'
+          )
+
+          prompt_anchor = '    "CUANDO MODIFIQUES UN SISTEMA EXISTENTE:\\n" +'
+          if extra_prompt not in text and prompt_anchor in text:
+              injected = (
+                  '    "DECISIÓN OBLIGATORIA DE OPERACIÓN:\\n" +\n'
+                  '    "- Antes de crear cada action compara path + name contra el MANIFEST real del proyecto. Si ya existe y el ClassName coincide, DEBES usar update_*; NUNCA uses create_* para un archivo existente. Solo usa create_* cuando realmente no exista.\\n" +\n'
+                  '    "- Si el usuario pide modificar un sistema existente, cada archivo existente que cambie DEBE salir como update_* y con su SOURCE COMPLETO.\\n" +\n'
+                  prompt_anchor
+              )
+              text = text.replace(prompt_anchor, injected, 1)
+
+          path.write_text(text, encoding='utf-8')
+
+      - name: Commit patched server.js and remove temporary workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ia/server.js
+          git rm .github/workflows/fix-crud-actions.yml
+          git commit -m "Enforce CRUD create versus update from project context"
+          git push
