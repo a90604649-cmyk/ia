@@ -206,7 +206,7 @@ function crearContextoReciente(limite = 8) {
 async function hablarConGemini(mensajeUsuario) {
     agregarHistorial("user", mensajeUsuario);
 
-    for (let intento = 1; intento <= 3; intento++) {
+    for (let intento = 1; intento <= 2; intento++) {
         try {
             console.log(`\n⏳ Gemini respondiendo... intento ${intento}/3`);
 
@@ -664,9 +664,9 @@ async function programarConDeepSeek(mensajeUsuario) {
                 }
             ], {
                 reasoningEffort: process.env.DEEPSEEK_REASONING || "high",
-                maxTokens: 2800,
+                maxTokens: 8000,
                 temperature: 0.2,
-                maxReintentos: 3
+                maxReintentos: 2
             });
 
 
@@ -712,7 +712,7 @@ async function programarConDeepSeek(mensajeUsuario) {
                 return null;
             }
 
-            if (intento === 3) {
+            if (intento === 2) {
                 return null;
             }
 
