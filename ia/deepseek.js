@@ -6,6 +6,17 @@ const OPENROUTER_MODEL =
 const PROJECT_CONTEXT_URL =
     `http://127.0.0.1:${process.env.PROJECT_CONTEXT_PORT || 3001}/project-context`;
 
+// Compatibilidad con /health: el servidor antiguo comprueba OPENROUTER_API_KEY.
+// La clave real seguirá saliendo de OPENROUTER_API_KEYS y se rotará normalmente.
+const clavesConfiguradas = String(process.env.OPENROUTER_API_KEYS || "")
+    .split(",")
+    .map((clave) => clave.trim())
+    .filter(Boolean);
+
+if (!String(process.env.OPENROUTER_API_KEY || "").trim() && clavesConfiguradas.length > 0) {
+    process.env.OPENROUTER_API_KEY = clavesConfiguradas[0];
+}
+
 function sleep(ms) {
     return new Promise(function(resolve) {
         setTimeout(resolve, ms);
@@ -299,7 +310,7 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
 
     if (claves.length === 0) {
         throw new Error(
-            "No se encontró ninguna clave. Configura OPENROUTER_API_KEY o OPENROUTER_API_KEYS en el archivo .env"
+            "No se encontró ninguna clave. Configura OPENROUTER_API_KEYS en el archivo .env"
         );
     }
 
