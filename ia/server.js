@@ -17,166 +17,96 @@ if (!GEMINI_API_KEY) {
     process.exit(1);
 }
 
-const ai = new GoogleGenAI({
-    apiKey: GEMINI_API_KEY
-});
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 let pendingActions = [];
 let r6Calibration = null;
-const historial = [];
 let contextoScriptSeleccionado = null;
+const historial = [];
 
 const CHAT_SYSTEM =
     "Eres un asistente experto en Roblox Studio y Luau.\n\n" +
     "Puedes conversar normalmente con el usuario.\n\n" +
-    "Cuando el usuario pregunte algo que no requiere cambios de código, responde de forma clara y útil.\n\n" +
-    "Cuando el usuario quiera programar, crear, corregir o modificar Roblox, otra IA llamada DeepSeek V4 Pro será el programador.\n" +
-    "No intentes sustituir al programador en esa tarea.\n";
+    "Cuando la petición requiera programación de Roblox, DeepSeek V4 Pro será el programador que implementará los cambios.\n";
+
+const ROUTER_SYSTEM =
+    "Eres el analista técnico de una IA que programa Roblox Studio y Luau.\n\n" +
+    "Tu función es convertir la petición del usuario en un brief técnico preciso para DeepSeek V4 Pro.\n" +
+    "No escribas el código final.\n" +
+    "Determina qué sistema debe cambiarse, qué objetos intervienen y qué archivos son relevantes.\n" +
+    "Usa el contexto real del proyecto cuando esté disponible.\n";
 
 const PROGRAMMER_SYSTEM =
     "Eres el programador principal de Roblox Studio y Luau.\n\n" +
-    "Tu trabajo es producir cambios de código completos, coherentes y listos para aplicar en Roblox Studio.\n\n" +
-    "Debes analizar la petición antes de escribir código.\n" +
-    "Respeta la arquitectura cliente-servidor de Roblox.\n" +
-    "Usa Script, LocalScript y ModuleScript correctamente.\n" +
-    "Usa APIs actuales de Roblox y evita APIs obsoletas cuando exista una alternativa actual.\n" +
-    "No uses pseudocódigo.\n" +
-    "No inventes servicios, clases, propiedades, eventos ni métodos que no existan.\n\n" +
+    "Debes crear, modificar, actualizar y eliminar archivos Script, LocalScript y ModuleScript del proyecto real.\n\n" +
+    "Puedes crear carpetas y eliminarlas cuando sea necesario.\n\n" +
+    "REGLA CRITICA DE IDENTIFICACION:\n" +
+    "- Nunca identifiques un objeto solo por su nombre.\n" +
+    "- Para archivos existentes, el SOURCE REAL del Project Context y su ClassName tienen prioridad absoluta.\n" +
+    "- Una misma palabra puede ser una carpeta, un Script, un LocalScript o un ModuleScript en niveles diferentes.\n" +
+    "- La ruta de una acción apunta al CONTENEDOR PADRE y name apunta al OBJETO objetivo.\n" +
+    "- Ejemplo: si existe StarterPlayer/StarterPlayerScripts/SprintController como LocalScript, una actualización de ese archivo debe usar path=StarterPlayer/StarterPlayerScripts y name=SprintController.\n" +
+    "- Si existe un hijo StarterPlayer/StarterPlayerScripts/SprintController/SprintController como Script, su actualización debe usar path=StarterPlayer/StarterPlayerScripts/SprintController y name=SprintController.\n" +
+    "- Nunca cambies Script por LocalScript ni LocalScript por Script.\n\n" +
     "CUANDO MODIFIQUES UN SISTEMA EXISTENTE:\n" +
-    "- Devuelve el archivo completo afectado, no un parche parcial.\n" +
-    "- Conserva la funcionalidad existente que el usuario no pidió cambiar.\n" +
-    "- Si un cambio requiere varios archivos, devuelve TODOS los archivos necesarios.\n" +
-    "- Usa la misma RUTA y NOMBRE del archivo para que el bridge pueda reemplazarlo.\n" +
-    "- Si necesitas crear una carpeta, puedes representarla dentro de RUTA.\n\n" +
-    "UBICACIONES VALIDAS:\n" +
-    "ServerScriptService\n" +
-    "ReplicatedStorage\n" +
-    "StarterPlayer/StarterPlayerScripts\n" +
-    "StarterPlayer/StarterCharacterScripts\n" +
-    "StarterGui\n" +
-    "Workspace\n" +
-    "ServerStorage\n" +
-    "StarterPack\n\n" +
-    "REGLAS DE ROBLOX:\n" +
-    "- La lógica de servidor va en Script o ModuleScript del servidor.\n" +
-    "- La lógica de cliente va en LocalScript o módulos accesibles por el cliente.\n" +
-    "- Usa RemoteEvent/RemoteFunction para comunicación cliente-servidor cuando corresponda.\n" +
-    "- Valida en el servidor cualquier acción importante iniciada por el cliente.\n" +
-    "- No pongas secretos ni claves de API dentro de Luau.\n\n" +
-    "FORMATO OBLIGATORIO DE RESPUESTA:\n" +
-    "Devuelve UN SOLO objeto JSON válido. No escribas texto fuera del JSON. No uses markdown ni bloques ``` .\n\n" +
-    "Estructura exacta:\n" +
+    "- Conserva toda la funcionalidad que el usuario no pidió cambiar.\n" +
+    "- Devuelve el SOURCE COMPLETO del archivo actualizado.\n" +
+    "- Usa exactamente el mismo tipo, ruta y nombre del archivo existente.\n" +
+    "- Si hacen falta varios archivos, devuelve todos los archivos necesarios.\n\n" +
+    "OPERACIONES DISPONIBLES:\n" +
+    "create_script\n" +
+    "create_local_script\n" +
+    "create_module_script\n" +
+    "update_script\n" +
+    "update_local_script\n" +
+    "update_module_script\n" +
+    "delete_script\n" +
+    "delete_local_script\n" +
+    "delete_module_script\n" +
+    "create_folder\n" +
+    "delete_folder\n\n" +
+    "Para create/update, path es el contenedor padre, name es el objeto y code contiene el SOURCE COMPLETO.\n" +
+    "Para delete, path es el contenedor padre y name es el objeto; no incluyas code.\n" +
+    "Para carpetas, path es el contenedor padre y name es la carpeta.\n\n" +
+    "FORMATO OBLIGATORIO:\n" +
+    "Devuelve UN SOLO objeto JSON válido. No uses markdown ni texto fuera del JSON.\n\n" +
+    "Ejemplo de actualización:\n" +
     "{\n" +
-    "  \"reply\": \"explicación breve\",\n" +
+    "  \"reply\": \"Actualicé el sistema.\",\n" +
     "  \"actions\": [\n" +
     "    {\n" +
-    "      \"type\": \"create_script\",\n" +
-    "      \"path\": \"ServerScriptService\",\n" +
-    "      \"name\": \"Nombre\",\n" +
-    "      \"code\": \"codigo Luau completo\"\n" +
+    "      \"type\": \"update_local_script\",\n" +
+    "      \"path\": \"StarterPlayer/StarterPlayerScripts\",\n" +
+    "      \"name\": \"SprintController\",\n" +
+    "      \"className\": \"LocalScript\",\n" +
+    "      \"code\": \"SOURCE COMPLETO\"\n" +
     "    }\n" +
     "  ]\n" +
     "}\n\n" +
-    "TIPOS PERMITIDOS:\n" +
-    "create_script\n" +
-    "create_local_script\n" +
-    "create_module_script\n\n" +
-    "IMPORTANTE:\n" +
-    "- El valor de code debe ser una cadena JSON válida con el código Luau completo.\n" +
-    "- Si no hace falta cambiar código, actions debe ser [].\n" +
-    "- No devuelvas archivos que no sean necesarios.\n" +
-    "- No ocultes errores. Si la petición es imposible con la información disponible, explica exactamente qué falta en reply y usa actions=[].\n";
-
-const ROUTER_SYSTEM =
-    "Eres el analista de una IA de programación para Roblox Studio y Luau.\n\n" +
-    "El usuario habla contigo en español. Tu función es convertir su petición en un brief técnico muy claro para DeepSeek V4 Pro, que será quien escribirá el código.\n\n" +
-    "Debes determinar qué quiere lograr realmente el usuario, qué comportamiento espera, qué partes de Roblox están implicadas, si es una modificación o un sistema nuevo y qué restricciones ya existen.\n\n" +
-    "No escribas el código final. No uses markdown. No inventes información que el usuario no haya dado. Si falta un dato, dilo como incertidumbre y deja que el programador tome una decisión razonable.\n\n" +
-    "Incluye:\n" +
-    "- objetivo exacto\n" +
-    "- comportamiento esperado\n" +
-    "- contexto relevante de la conversación\n" +
-    "- restricciones y nombres/rutas conocidas\n" +
-    "- riesgos o errores que el programador debería evitar\n" +
-    "- criterio de terminado\n";
-
-function esTareaDeAnimacion(mensaje) {
-    const patrones = [
-        "animacion",
-        "animación",
-        "animaciones",
-        "animar",
-        "anima",
-        "keyframe",
-        "keyframes",
-        "pose",
-        "poses",
-        "r6",
-        "movimiento"
-    ];
-
-    const texto = mensaje.toLowerCase();
-    return patrones.some(function(palabra) {
-        return texto.includes(palabra);
-    });
-}
-
-function esTareaDeCodigo(mensaje) {
-    const patrones = [
-        "codigo",
-        "código",
-        "script",
-        "scripts",
-        "luau",
-        "lua",
-        "roblox",
-        "studio",
-        "crea",
-        "crear",
-        "haz",
-        "hacer",
-        "programa",
-        "programar",
-        "sistema",
-        "funcion",
-        "función",
-        "corrige",
-        "corregir",
-        "modifica",
-        "modificar",
-        "arregla",
-        "arreglar",
-        "error",
-        "bug",
-        "localscript",
-        "local script",
-        "modulescript",
-        "module script",
-        "remoteevent",
-        "remotefunction",
-        "gui",
-        "tool",
-        "remote"
-    ];
-
-    const texto = mensaje.toLowerCase();
-    return patrones.some(function(palabra) {
-        return texto.includes(palabra);
-    });
-}
+    "Ejemplo de eliminación:\n" +
+    "{\n" +
+    "  \"reply\": \"Eliminé el archivo.\",\n" +
+    "  \"actions\": [\n" +
+    "    {\n" +
+    "      \"type\": \"delete_script\",\n" +
+    "      \"path\": \"ServerScriptService\",\n" +
+    "      \"name\": \"Prueba\",\n" +
+    "      \"className\": \"Script\"\n" +
+    "    }\n" +
+    "  ]\n" +
+    "}\n\n" +
+    "REGLAS ROBLOX:\n" +
+    "- Usa Script para servidor, LocalScript para cliente y ModuleScript para módulos.\n" +
+    "- Respeta RemoteEvent/RemoteFunction y la separación cliente-servidor.\n" +
+    "- No inventes APIs ni objetos.\n" +
+    "- No pongas claves de API en Luau.\n";
 
 function agregarHistorial(role, text) {
-    if (!text) {
-        return;
-    }
+    if (!text) return;
 
     historial.push({
         role,
-        parts: [
-            {
-                text: String(text)
-            }
-        ]
+        parts: [{ text: String(text) }]
     });
 
     if (historial.length > 30) {
@@ -186,21 +116,44 @@ function agregarHistorial(role, text) {
 
 function obtenerTextoMensaje(mensaje) {
     return mensaje?.parts
-        ?.map(function(parte) {
-            return parte?.text || "";
-        })
+        ?.map((parte) => parte?.text || "")
         .join(" ") || "";
 }
 
 function crearContextoReciente(limite = 8) {
     return historial
         .slice(-limite)
-        .map(function(mensaje) {
+        .map((mensaje) => {
             const rol = mensaje.role === "user" ? "Usuario" : "Asistente";
-            const texto = obtenerTextoMensaje(mensaje);
-            return `${rol}: ${texto}`;
+            return `${rol}: ${obtenerTextoMensaje(mensaje)}`;
         })
         .join("\n");
+}
+
+function esTareaDeAnimacion(mensaje) {
+    const patrones = [
+        "animacion", "animación", "animaciones", "animar",
+        "keyframe", "keyframes", "pose", "poses", "r6"
+    ];
+
+    const texto = String(mensaje || "").toLowerCase();
+    return patrones.some((patron) => texto.includes(patron));
+}
+
+function esTareaDeCodigo(mensaje) {
+    const patrones = [
+        "codigo", "código", "script", "scripts", "luau", "lua",
+        "roblox", "studio", "crea", "crear", "nuevo", "nueva",
+        "haz", "hacer", "programa", "programar", "sistema",
+        "funcion", "función", "corrige", "corregir", "modifica",
+        "modificar", "actualiza", "actualizar", "elimina", "eliminar",
+        "borra", "borrar", "delete", "update", "bug", "error",
+        "localscript", "local script", "modulescript", "module script",
+        "remoteevent", "remotefunction", "gui", "tool", "remote"
+    ];
+
+    const texto = String(mensaje || "").toLowerCase();
+    return patrones.some((patron) => texto.includes(patron));
 }
 
 async function hablarConGemini(mensajeUsuario) {
@@ -208,21 +161,19 @@ async function hablarConGemini(mensajeUsuario) {
 
     for (let intento = 1; intento <= 2; intento++) {
         try {
-            console.log(`\n⏳ Gemini respondiendo... intento ${intento}/3`);
+            console.log(`\n⏳ Gemini respondiendo... intento ${intento}/2`);
 
             const response = await ai.models.generateContent({
                 model: CHAT_MODEL,
                 contents: historial,
                 config: {
                     systemInstruction: CHAT_SYSTEM,
-                    thinkingConfig: {
-                        thinkingLevel: "low"
-                    },
+                    thinkingConfig: { thinkingLevel: "low" },
                     maxOutputTokens: 4096
                 }
             });
 
-            const texto = response.text;
+            const texto = response.text?.trim();
 
             if (!texto) {
                 throw new Error("Gemini no devolvió texto.");
@@ -232,30 +183,15 @@ async function hablarConGemini(mensajeUsuario) {
             console.log(`\n${texto}`);
             return texto;
         } catch (error) {
-            const mensajeError = error instanceof Error
-                ? error.message
-                : String(error);
+            const mensaje = error instanceof Error ? error.message : String(error);
+            console.error("\n❌ Error de Gemini:", mensaje);
 
-            console.error("\n❌ Error de Gemini:");
-            console.error(mensajeError);
-
-            const temporal =
-                mensajeError.includes("429") ||
-                mensajeError.includes("500") ||
-                mensajeError.includes("502") ||
-                mensajeError.includes("503") ||
-                mensajeError.includes("504") ||
-                mensajeError.includes("UNAVAILABLE") ||
-                mensajeError.includes("RESOURCE_EXHAUSTED");
-
-            if (!temporal || intento === 3) {
+            const temporal = /429|500|502|503|504|UNAVAILABLE|RESOURCE_EXHAUSTED/.test(mensaje);
+            if (!temporal || intento === 2) {
                 return null;
             }
 
-            const espera = intento * 2000;
-            await new Promise(function(resolve) {
-                setTimeout(resolve, espera);
-            });
+            await new Promise((resolve) => setTimeout(resolve, intento * 2000));
         }
     }
 
@@ -263,9 +199,8 @@ async function hablarConGemini(mensajeUsuario) {
 }
 
 async function prepararTareaConGemini(mensajeUsuario) {
-    agregarHistorial("user", mensajeUsuario);
-
     const contexto = crearContextoReciente(10);
+
     const entrada =
         "CONTEXTO DE CONVERSACIÓN:\n" +
         contexto +
@@ -278,45 +213,32 @@ async function prepararTareaConGemini(mensajeUsuario) {
             contents: [
                 {
                     role: "user",
-                    parts: [
-                        {
-                            text: entrada
-                        }
-                    ]
+                    parts: [{ text: entrada }]
                 }
             ],
             config: {
                 systemInstruction: ROUTER_SYSTEM,
-                thinkingConfig: {
-                    thinkingLevel: "medium"
-                },
+                thinkingConfig: { thinkingLevel: "medium" },
                 maxOutputTokens: 4096
             }
         });
 
         const brief = response.text?.trim();
-
         if (!brief) {
             throw new Error("Gemini no generó el brief técnico.");
         }
 
-        agregarHistorial("model", `Brief técnico enviado al programador:\n${brief}`);
-
         console.log("\n🧠 Gemini preparó la tarea.");
-
         return brief;
     } catch (error) {
-        const mensajeError = error instanceof Error
-            ? error.message
-            : String(error);
-
-        console.warn("⚠️ Gemini no pudo preparar el brief:", mensajeError);
+        const mensaje = error instanceof Error ? error.message : String(error);
+        console.warn("⚠️ Gemini no pudo preparar el brief:", mensaje);
         console.warn("↪️ DeepSeek recibirá directamente la petición del usuario.");
         return mensajeUsuario;
     }
 }
 
-function limpiarJsonMarkdown(texto) {
+function limpiarJson(texto) {
     return String(texto || "")
         .trim()
         .replace(/^```json\s*/i, "")
@@ -325,29 +247,66 @@ function limpiarJsonMarkdown(texto) {
         .trim();
 }
 
-function parsearObjetoJson(texto) {
-    const limpio = limpiarJsonMarkdown(texto);
+function parsearJson(texto) {
+    const limpio = limpiarJson(texto);
 
     try {
         return JSON.parse(limpio);
     } catch {
-        // Continúa con extracción tolerante.
+        const inicio = limpio.indexOf("{");
+        const fin = limpio.lastIndexOf("}");
+
+        if (inicio === -1 || fin <= inicio) {
+            return null;
+        }
+
+        try {
+            return JSON.parse(limpio.slice(inicio, fin + 1));
+        } catch {
+            return null;
+        }
+    }
+}
+
+const TIPOS_CRUD = new Set([
+    "create_script",
+    "create_local_script",
+    "create_module_script",
+    "update_script",
+    "update_local_script",
+    "update_module_script",
+    "delete_script",
+    "delete_local_script",
+    "delete_module_script",
+    "create_folder",
+    "delete_folder"
+]);
+
+const CLASE_POR_TIPO = {
+    create_script: "Script",
+    create_local_script: "LocalScript",
+    create_module_script: "ModuleScript",
+    update_script: "Script",
+    update_local_script: "LocalScript",
+    update_module_script: "ModuleScript",
+    delete_script: "Script",
+    delete_local_script: "LocalScript",
+    delete_module_script: "ModuleScript"
+};
+
+function normalizarTipoGenerico(action) {
+    const operation = String(action.operation || "").trim().toLowerCase();
+    const className = String(action.className || "").trim();
+
+    if (!operation || !["create", "update", "delete"].includes(operation)) {
+        return action.type;
     }
 
-    const primerInicio = limpio.indexOf("{");
-    const ultimoFin = limpio.lastIndexOf("}");
+    if (className === "Script") return `${operation}_script`;
+    if (className === "LocalScript") return `${operation}_local_script`;
+    if (className === "ModuleScript") return `${operation}_module_script`;
 
-    if (primerInicio === -1 || ultimoFin <= primerInicio) {
-        return null;
-    }
-
-    try {
-        return JSON.parse(
-            limpio.substring(primerInicio, ultimoFin + 1)
-        );
-    } catch {
-        return null;
-    }
+    return action.type;
 }
 
 function normalizarAccion(action) {
@@ -355,50 +314,38 @@ function normalizarAccion(action) {
         return null;
     }
 
-    let type = String(action.type || "").trim();
+    const type = normalizarTipoGenerico(action);
 
-    if (type === "Script") {
-        type = "create_script";
-    }
-
-    if (type === "LocalScript") {
-        type = "create_local_script";
-    }
-
-    if (type === "ModuleScript") {
-        type = "create_module_script";
-    }
-
-    const tiposPermitidos = new Set([
-        "create_script",
-        "create_local_script",
-        "create_module_script"
-    ]);
-
-    if (!tiposPermitidos.has(type)) {
+    if (!TIPOS_CRUD.has(type)) {
         return null;
     }
 
     const name = String(action.name || "").trim();
     const path = String(action.path || "").trim();
-    const code = String(action.code || "").trim();
 
     const rutasPermitidas = [
         "ServerScriptService",
+        "ServerStorage",
         "ReplicatedStorage",
+        "StarterGui",
+        "StarterPlayer",
         "StarterPlayer/StarterPlayerScripts",
         "StarterPlayer/StarterCharacterScripts",
-        "StarterGui",
+        "StarterPack",
         "Workspace",
-        "ServerStorage",
-        "StarterPack"
+        "SoundService",
+        "Lighting",
+        "ReplicatedFirst",
+        "Teams",
+        "TextChatService",
+        "Chat"
     ];
 
-    const rutaValida = rutasPermitidas.some(function(base) {
-        return path === base || path.startsWith(`${base}/`);
-    });
+    const rutaValida = rutasPermitidas.some((base) =>
+        path === base || path.startsWith(`${base}/`)
+    );
 
-    if (!name || !code || !rutaValida || path.includes("..")) {
+    if (!name || !rutaValida || path.includes("..")) {
         return null;
     }
 
@@ -406,20 +353,45 @@ function normalizarAccion(action) {
         return null;
     }
 
-    return {
-        type,
-        name,
-        path,
-        code
-    };
-}
+    if (type === "create_folder" || type === "delete_folder") {
+        return {
+            type,
+            name,
+            path
+        };
+    }
 
-function extraerAccionesDesdeObjeto(objeto) {
-    if (!objeto || typeof objeto !== "object") {
+    const className = CLASE_POR_TIPO[type];
+    const suppliedClass = String(action.className || "").trim();
+
+    if (suppliedClass && suppliedClass !== className) {
         return null;
     }
 
-    if (!Array.isArray(objeto.actions)) {
+    const result = {
+        type,
+        className,
+        name,
+        path
+    };
+
+    if (!type.startsWith("delete_")) {
+        const code = String(action.code || "");
+
+        if (!code.trim()) {
+            return null;
+        }
+
+        result.code = code;
+    }
+
+    return result;
+}
+
+function extraerResultado(texto) {
+    const objeto = parsearJson(texto);
+
+    if (!objeto || !Array.isArray(objeto.actions)) {
         return null;
     }
 
@@ -430,187 +402,27 @@ function extraerAccionesDesdeObjeto(objeto) {
 
         if (normalizada) {
             actions.push(normalizada);
-        } else if (action && Object.keys(action).length > 0) {
-            console.warn("⚠️ Acción rechazada durante validación:", action.name || "sin nombre");
+        } else {
+            console.warn(
+                "⚠️ Acción rechazada durante validación:",
+                action?.type || action?.operation || "desconocida",
+                action?.path || "",
+                action?.name || ""
+            );
         }
     }
 
     const unicas = new Map();
 
     for (const action of actions) {
-        unicas.set(`${action.path}/${action.name}`, action);
+        const key = `${action.type}|${action.path}/${action.name}`;
+        unicas.set(key, action);
     }
 
     return {
         reply: String(objeto.reply || "Sistema procesado por DeepSeek.").trim(),
         actions: Array.from(unicas.values())
     };
-}
-
-function extraerFormatoLegacy(texto) {
-    const normalizado = String(texto || "")
-        .replace(/\r\n/g, "\n")
-        .replace(/\r/g, "\n");
-
-    const respuestaInicio = normalizado.indexOf("RESPUESTA:");
-    const archivosInicio = normalizado.indexOf("ARCHIVOS_START");
-    const archivosFin = normalizado.lastIndexOf("ARCHIVOS_END");
-
-    if (
-        respuestaInicio === -1 ||
-        archivosInicio === -1 ||
-        archivosFin === -1 ||
-        archivosFin <= archivosInicio
-    ) {
-        return null;
-    }
-
-    const respuesta = normalizado
-        .substring(
-            respuestaInicio + "RESPUESTA:".length,
-            archivosInicio
-        )
-        .trim();
-
-    const contenidoArchivos = normalizado
-        .substring(
-            archivosInicio + "ARCHIVOS_START".length,
-            archivosFin
-        )
-        .trim();
-
-    const bloques = contenidoArchivos
-        .split("ARCHIVO_START")
-        .slice(1);
-
-    const actions = [];
-
-    for (const bloqueCompleto of bloques) {
-        const posicionFin = bloqueCompleto.indexOf("ARCHIVO_END");
-
-        if (posicionFin === -1) {
-            continue;
-        }
-
-        const bloque = bloqueCompleto
-            .substring(0, posicionFin)
-            .trim();
-
-        function valorLinea(etiqueta) {
-            const indice = bloque.indexOf(`${etiqueta}:`);
-
-            if (indice === -1) {
-                return "";
-            }
-
-            const inicio = indice + etiqueta.length + 1;
-            const fin = etiqueta === "NOMBRE"
-                ? bloque.indexOf("CODIGO_START", inicio)
-                : etiqueta === "RUTA"
-                    ? bloque.indexOf("NOMBRE:", inicio)
-                    : bloque.indexOf("RUTA:", inicio);
-
-            return bloque
-                .substring(inicio, fin === -1 ? bloque.length : fin)
-                .trim();
-        }
-
-        const tipo = valorLinea("TIPO");
-        const path = valorLinea("RUTA");
-        const name = valorLinea("NOMBRE");
-        const codigoInicio = bloque.indexOf("CODIGO_START");
-        const codigoFin = bloque.lastIndexOf("CODIGO_END");
-
-        if (codigoInicio === -1 || codigoFin <= codigoInicio) {
-            continue;
-        }
-
-        const code = bloque
-            .substring(codigoInicio + "CODIGO_START".length, codigoFin)
-            .trim();
-
-        const action = normalizarAccion({
-            type,
-            path,
-            name,
-            code
-        });
-
-        if (action) {
-            actions.push(action);
-        }
-    }
-
-    if (actions.length === 0) {
-        return null;
-    }
-
-    return {
-        reply: respuesta || "Sistema generado por DeepSeek.",
-        actions
-    };
-}
-
-function interpretarRespuestaDeepSeek(texto) {
-    const objeto = parsearObjetoJson(texto);
-    const resultadoJson = extraerAccionesDesdeObjeto(objeto);
-
-    if (resultadoJson) {
-        return resultadoJson;
-    }
-
-    return extraerFormatoLegacy(texto);
-}
-
-
-function formatearRespuestaFinal(reply) {
-    const texto = String(reply || "")
-        .replace(/\r/g, "")
-        .trim();
-
-    if (!texto) {
-        return "La solicitud fue procesada correctamente.";
-    }
-
-    let lineas = texto
-        .split("\n")
-        .map((linea) => linea.trim())
-        .filter(Boolean);
-
-    if (lineas.length >= 3) {
-        return lineas.slice(0, 4).join("\n");
-    }
-
-    const frases = texto
-        .split(/(?<=[.!?])\s+/)
-        .map((frase) => frase.trim())
-        .filter(Boolean);
-
-    if (frases.length >= 3) {
-        return frases.slice(0, 4).join("\n");
-    }
-
-    return lineas.join("\n");
-}
-
-
-function respuestaFinalBreve(texto) {
-    const limpio = String(texto || "")
-        .replace(/\r/g, " ")
-        .replace(/\n+/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-
-    if (!limpio) {
-        return "La solicitud fue procesada correctamente.";
-    }
-
-    const frases =
-        limpio.match(/[^.!?]+[.!?]+/g)
-        ?.map((frase) => frase.trim())
-        .filter(Boolean) || [limpio];
-
-    return frases.slice(0, 4).join("\n");
 }
 
 async function programarConDeepSeek(mensajeUsuario) {
@@ -621,19 +433,14 @@ async function programarConDeepSeek(mensajeUsuario) {
 
     if (contextoScriptSeleccionado) {
         contextoScript =
-            "\n\nSCRIPT ACTUAL SELECCIONADO EN ROBLOX STUDIO:\n" +
+            "\n\nSCRIPT SELECCIONADO EN ROBLOX STUDIO:\n" +
             `TIPO: ${contextoScriptSeleccionado.className}\n` +
             `RUTA: ${contextoScriptSeleccionado.path}\n` +
             `NOMBRE: ${contextoScriptSeleccionado.name}\n` +
-            "SOURCE ACTUAL:\n" +
+            "SOURCE REAL:\n" +
             "----- INICIO SOURCE -----\n" +
             contextoScriptSeleccionado.source +
-            "\n----- FIN SOURCE -----\n\n" +
-            "IMPORTANTE: Este es el código REAL del script seleccionado. " +
-            "Si el usuario pide modificarlo, trabaja sobre este código existente. " +
-            "Conserva la funcionalidad que no se pidió cambiar y devuelve el archivo completo. " +
-            `Usa exactamente el mismo tipo, ruta y nombre: ${contextoScriptSeleccionado.className}, ` +
-            `${contextoScriptSeleccionado.path}/${contextoScriptSeleccionado.name}.\n`;
+            "\n----- FIN SOURCE -----\n";
     }
 
     let instruccion =
@@ -643,15 +450,19 @@ async function programarConDeepSeek(mensajeUsuario) {
         "BRIEF PREPARADO POR GEMINI:\n" +
         brief +
         "\n\n" +
-        "CONTEXTO RECIENTE ADICIONAL:\n" +
+        "CONTEXTO RECIENTE:\n" +
         contexto +
         contextoScript +
         "\n\n" +
-        "Ahora implementa la solución. Respeta exactamente el formato JSON solicitado. Si modificas un archivo existente, devuelve su contenido completo.\n";
+        "IMPLEMENTA AHORA LA SOLUCIÓN.\n" +
+        "Antes de decidir qué archivo tocar, identifica en el SOURCE REAL cuál objeto contiene la lógica solicitada.\n" +
+        "Si existen objetos con el mismo nombre en niveles distintos, usa ruta + nombre + ClassName para distinguirlos.\n" +
+        "No conviertas un Script en LocalScript ni viceversa.\n" +
+        "Devuelve únicamente el JSON indicado por el sistema.\n";
 
-    for (let intento = 1; intento <= 3; intento++) {
+    for (let intento = 1; intento <= 2; intento++) {
         try {
-            console.log(`\n🤖 DeepSeek programando... intento ${intento}/3`);
+            console.log(`\n🤖 DeepSeek programando... intento ${intento}/2`);
 
             const texto = await preguntarDeepSeek([
                 {
@@ -663,26 +474,29 @@ async function programarConDeepSeek(mensajeUsuario) {
                     content: instruccion
                 }
             ], {
-                reasoningEffort: process.env.DEEPSEEK_REASONING || "high",
+                reasoningEffort: "none",
                 maxTokens: 8000,
                 temperature: 0.2,
                 maxReintentos: 2
             });
 
-
-            const resultado = interpretarRespuestaDeepSeek(texto);
+            const resultado = extraerResultado(texto);
 
             if (!resultado) {
                 console.warn("⚠️ DeepSeek no devolvió un resultado interpretable.");
 
                 instruccion =
                     "La respuesta anterior no pudo ser interpretada.\n" +
-                    "Devuelve ÚNICAMENTE un objeto JSON válido con las propiedades reply y actions.\n" +
-                    "No uses markdown. Cada action debe tener type, path, name y code.\n\n" +
+                    "Devuelve ÚNICAMENTE un objeto JSON válido con reply y actions.\n" +
+                    "Cada acción debe usar exactamente uno de estos tipos: " +
+                    Array.from(TIPOS_CRUD).join(", ") + ".\n" +
+                    "En update/create usa el ClassName real del contexto y el SOURCE COMPLETO.\n" +
+                    "En delete no incluyas code.\n\n" +
                     "PETICIÓN ORIGINAL:\n" +
                     mensajeUsuario +
                     "\n\nBRIEF:\n" +
-                    brief;
+                    brief +
+                    contextoScript;
 
                 continue;
             }
@@ -690,25 +504,29 @@ async function programarConDeepSeek(mensajeUsuario) {
             pendingActions = resultado.actions;
 
             agregarHistorial(
+                "user",
+                mensajeUsuario
+            );
+
+            agregarHistorial(
                 "model",
                 resultado.reply || "Sistema programado con DeepSeek."
             );
 
             console.log("\n✅ DeepSeek terminó.");
-            console.log(`📦 ${pendingActions.length} cambios preparados para Roblox Studio.`);
-
+            console.log(
+                `📦 ${pendingActions.length} cambios preparados para Roblox Studio.`
+            );
 
             return resultado;
         } catch (error) {
-            const mensajeError = error instanceof Error
-                ? error.message
-                : String(error);
+            const mensaje = error instanceof Error ? error.message : String(error);
 
             console.error("\n❌ Error de DeepSeek:");
-            console.error(mensajeError);
+            console.error(mensaje);
 
-            if (mensajeError.includes("OpenRouter 402")) {
-                console.error("💳 Crédito insuficiente para esta petición. No se reintentará.");
+            if (mensaje.includes("OpenRouter 402")) {
+                console.error("💳 Crédito insuficiente para esta petición.");
                 return null;
             }
 
@@ -716,9 +534,7 @@ async function programarConDeepSeek(mensajeUsuario) {
                 return null;
             }
 
-            await new Promise(function(resolve) {
-                setTimeout(resolve, intento * 2000);
-            });
+            await new Promise((resolve) => setTimeout(resolve, intento * 2000));
         }
     }
 
@@ -726,11 +542,8 @@ async function programarConDeepSeek(mensajeUsuario) {
 }
 
 async function preguntar(mensajeUsuario) {
-    const texto = mensajeUsuario.trim();
-
-    if (!texto) {
-        return;
-    }
+    const texto = String(mensajeUsuario || "").trim();
+    if (!texto) return;
 
     if (esTareaDeAnimacion(texto)) {
         try {
@@ -752,32 +565,18 @@ async function preguntar(mensajeUsuario) {
                 console.log(`\n${resultado.reply}`);
             }
 
-            if (
-                Array.isArray(resultado.actions) &&
-                resultado.actions.length > 0
-            ) {
+            if (Array.isArray(resultado.actions) && resultado.actions.length > 0) {
                 pendingActions = resultado.actions;
-
                 console.log(
                     `\n[ACCIONES DE ANIMACIÓN PARA ROBLOX]\nAcciones preparadas: ${pendingActions.length}`
                 );
             }
 
-            agregarHistorial(
-                "user",
-                texto
-            );
-
-            agregarHistorial(
-                "model",
-                resultado.reply || "Animación generada correctamente."
-            );
+            agregarHistorial("user", texto);
+            agregarHistorial("model", resultado.reply || "Animación generada correctamente.");
         } catch (error) {
-            const mensajeError = error instanceof Error
-                ? error.message
-                : String(error);
-
-            console.error("❌ Error en animation.js:", mensajeError);
+            const mensaje = error instanceof Error ? error.message : String(error);
+            console.error("❌ Error en animation.js:", mensaje);
         }
 
         return;
@@ -803,11 +602,17 @@ app.get("/", function(_req, res) {
 });
 
 app.get("/health", function(_req, res) {
+    const apiKeys = String(process.env.OPENROUTER_API_KEYS || "")
+        .split(",")
+        .map((key) => key.trim())
+        .filter(Boolean);
+
     res.json({
         ok: true,
         geminiConfigured: Boolean(GEMINI_API_KEY),
-        openrouterConfigured: Boolean(process.env.OPENROUTER_API_KEY),
-                chatModel: CHAT_MODEL,
+        openrouterConfigured: apiKeys.length > 0,
+        openrouterKeys: apiKeys.length,
+        chatModel: CHAT_MODEL,
         programmerModel: DEEPSEEK_MODEL,
         r6Calibrated: Boolean(r6Calibration),
         pendingActions: pendingActions.length
@@ -816,57 +621,28 @@ app.get("/health", function(_req, res) {
 
 app.post("/r6-calibration", function(req, res) {
     try {
-        if (!req.body || typeof req.body !== "object") {
-            return res.status(400).json({
-                ok: false,
-                error: "Calibración inválida."
-            });
+        const body = req.body;
+
+        if (!body || typeof body !== "object") {
+            return res.status(400).json({ ok: false, error: "Calibración inválida." });
         }
 
-        if (req.body.rig !== "R6") {
-            return res.status(400).json({
-                ok: false,
-                error: "La calibración no corresponde a R6."
-            });
+        if (body.rig !== "R6") {
+            return res.status(400).json({ ok: false, error: "La calibración no corresponde a R6." });
         }
 
-        if (!req.body.rigName) {
-            return res.status(400).json({
-                ok: false,
-                error: "Falta el nombre del rig."
-            });
+        if (!body.rigName || !body.joints || typeof body.joints !== "object") {
+            return res.status(400).json({ ok: false, error: "Datos de calibración incompletos." });
         }
 
-        if (
-            !req.body.joints ||
-            typeof req.body.joints !== "object"
-        ) {
-            return res.status(400).json({
-                ok: false,
-                error: "No se recibieron los joints calibrados."
-            });
-        }
-
-        r6Calibration = req.body;
+        r6Calibration = body;
 
         console.log("\n🧭 CALIBRACIÓN R6 RECIBIDA");
         console.log("🎯 Rig:", r6Calibration.rigName);
-        console.log(
-            "🦴 Joints:",
-            Object.keys(r6Calibration.joints).length
-        );
-        console.log(
-            "➡️ Frente:",
-            JSON.stringify(r6Calibration.forwardWorld)
-        );
-        console.log(
-            "↔️ Derecha:",
-            JSON.stringify(r6Calibration.rightWorld)
-        );
-        console.log(
-            "⬆️ Arriba:",
-            JSON.stringify(r6Calibration.upWorld)
-        );
+        console.log("🦴 Joints:", Object.keys(r6Calibration.joints).length);
+        console.log("➡️ Frente:", JSON.stringify(r6Calibration.forwardWorld));
+        console.log("↔️ Derecha:", JSON.stringify(r6Calibration.rightWorld));
+        console.log("⬆️ Arriba:", JSON.stringify(r6Calibration.upWorld));
 
         return res.json({
             ok: true,
@@ -874,7 +650,6 @@ app.post("/r6-calibration", function(req, res) {
         });
     } catch (error) {
         console.error("❌ Error procesando calibración R6:", error);
-
         return res.status(500).json({
             ok: false,
             error: "Error interno procesando la calibración."
@@ -884,10 +659,7 @@ app.post("/r6-calibration", function(req, res) {
 
 app.get("/r6-calibration", function(_req, res) {
     if (!r6Calibration) {
-        return res.json({
-            calibrated: false,
-            calibration: null
-        });
+        return res.json({ calibrated: false, calibration: null });
     }
 
     return res.json({
@@ -902,7 +674,6 @@ app.post("/selected-script", function(req, res) {
 
         if (!body || body.selected !== true) {
             contextoScriptSeleccionado = null;
-
             return res.json({
                 ok: true,
                 message: "Contexto de script limpiado."
@@ -949,11 +720,7 @@ app.post("/selected-script", function(req, res) {
             message: "Script seleccionado recibido correctamente."
         });
     } catch (error) {
-        console.error(
-            "❌ Error recibiendo script seleccionado:",
-            error
-        );
-
+        console.error("❌ Error recibiendo script seleccionado:", error);
         return res.status(500).json({
             ok: false,
             error: "Error interno recibiendo el script."
@@ -962,12 +729,9 @@ app.post("/selected-script", function(req, res) {
 });
 
 app.get("/next", function(_req, res) {
-    const acciones = pendingActions;
+    const actions = pendingActions;
     pendingActions = [];
-
-    return res.json({
-        actions: acciones
-    });
+    return res.json({ actions });
 });
 
 app.listen(PORT, function() {
@@ -978,6 +742,7 @@ app.listen(PORT, function() {
     console.log(`Chat: ${CHAT_MODEL}`);
     console.log(`Programador: ${DEEPSEEK_MODEL}`);
     console.log("Animaciones: pipeline Gemini existente");
+    console.log("CRUD de scripts: crear / actualizar / eliminar");
     console.log("Calibración: R6 automática");
     console.log("=================================\n");
 });
@@ -989,7 +754,7 @@ const rl = readline.createInterface({
 
 console.log("Escribe algo para hablar con el asistente.");
 console.log("Las tareas de programación pasan por Gemini → OpenRouter → DeepSeek.");
-console.log("Las tareas de animación usan el pipeline R6 existente.");
+console.log("DeepSeek puede crear, actualizar y eliminar Script, LocalScript y ModuleScript.");
 console.log("Escribe 'salir' para cerrar.\n");
 
 while (true) {
