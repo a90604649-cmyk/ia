@@ -140,10 +140,13 @@ jobs:
                   !objeto ||
                   typeof objeto !== "object" ||
                   Array.isArray(objeto) ||
-                  !Array.isArray(objeto.actions) ||
-                  typeof objeto.reply === "undefined"
+                  !Array.isArray(objeto.actions)
               ) {
                   return null;
+              }
+
+              if (typeof objeto.reply === "undefined") {
+                  objeto.reply = "Sistema actualizado por DeepSeek.";
               }
 
               return JSON.stringify(objeto);
@@ -189,7 +192,7 @@ jobs:
 
             if (!jsonNormalizado) {
                 ultimoError = new Error(
-                    "DeepSeek terminó la petición, pero la respuesta no contenía un JSON válido con reply y actions."
+                    "DeepSeek terminó la petición, pero la respuesta no contenía un JSON válido con actions."
                 );
 
                 console.warn(
