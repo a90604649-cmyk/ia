@@ -1,7 +1,8 @@
 import "dotenv/config";
 
-const OPENAI_URL = "https://api.openai.com/v1/responses";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-6-astra";
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const OPENROUTER_MODEL =
+    process.env.OPENROUTER_MODEL || "openai/gpt-6-astra";
 const PROJECT_CONTEXT_URL =
     `http://127.0.0.1:${process.env.PROJECT_CONTEXT_PORT || 3001}/project-context`;
 
@@ -13,7 +14,7 @@ function sleep(ms) {
 
 function obtenerErrorTexto(data) {
     if (!data) {
-        return "Error desconocido de OpenAI.";
+        return "Error desconocido de OpenRouter.";
     }
 
     if (typeof data === "string") {
@@ -45,7 +46,8 @@ function esReintentable(status, mensaje) {
         texto.includes("temporarily") ||
         texto.includes("unavailable") ||
         texto.includes("rate limit") ||
-        texto.includes("overloaded")
+        texto.includes("overloaded") ||
+        texto.includes("high demand")
     );
 }
 
@@ -220,70 +222,50 @@ function construirMensajeDeContexto(proyecto) {
 }
 
 function extraerTexto(data) {
-    if (typeof data?.output_text === "string" && data.output_text.trim()) {
-        return data.output_text.trim();
+    const texto = data?.choices?.[0]?.message?.content;
+
+    if (typeof texto === "string" && texto.trim()) {
+        return texto.trim();
     }
 
-    const partes = [];
+    const razon = data?.choices?.[0]?.finish_reason;
 
-    for (const item of data?.output || []) {
-        if (item?.type !== "message" || !Array.isArray(item.content)) {
-            continue;
-        }
-
-        for (const contenido of item.content) {
-            if (typeof contenido?.text === "string") {
-                partes.push(contenido.text);
-            }
-        }
-    }
-
-    const texto = partes.join("\n").trim();
-
-    if (!texto) {
-        const razon = data?.incomplete_details?.reason;
+    if (razon === "length") {
         throw new Error(
-            razon
-                ? `OpenAI no terminó la respuesta. Razón: ${razon}.`
-                : "OpenAI no devolvió contenido válido."
+            "OpenRouter agotó el límite de salida antes de terminar el JSON."
         );
     }
 
-    return texto;
+    throw new Error(
+        `OpenRouter no devolvió contenido válido: ${obtenerErrorTexto(data)}`
+    );
 }
 
 export async function preguntarGPT6Astra(mensajes, opciones = {}) {
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = process.env.OPENROUTER_API_KEY;
 
     if (!apiKey) {
         throw new Error(
-            "No se encontró OPENAI_API_KEY en el archivo .env"
+            "No se encontró OPENROUTER_API_KEY en el archivo .env"
         );
     }
 
     const maxReintentos = Number(opciones.maxReintentos || 3);
-    const maxOutputTokens = Math.min(
+    const maxTokens = Math.min(
         16384,
-        Math.max(256, Number(opciones.maxOutputTokens || 16384))
+        Math.max(256, Number(opciones.maxTokens || 16384))
     );
 
-    const input = Array.isArray(mensajes)
-        ? mensajes
-            .filter((mensaje) => mensaje?.role !== "system")
-            .map((mensaje) => ({
-                role: mensaje.role === "assistant" ? "assistant" : "user",
-                content: typeof mensaje.content === "string"
-                    ? mensaje.content
-                    : JSON.stringify(mensaje.content || "")
-            }))
+    const mensajesFinales = Array.isArray(mensajes)
+        ? mensajes.map((mensaje) => ({ ...mensaje }))
         : [];
 
-    if (esPeticionDeProgramacion(mensajes)) {
-        const proyecto = await obtenerContextoProyecto(mensajes);
+    if (esPeticionDeProgramacion(mensajesFinales)) {
+        const proyecto = await obtenerContextoProyecto(mensajesFinales);
         const contexto = construirMensajeDeContexto(proyecto);
 
         if (contexto) {
-            input.push({
+            mensajesFinales.push({
                 role: "user",
                 content: contexto
             });
@@ -299,69 +281,36 @@ export async function preguntarGPT6Astra(mensajes, opciones = {}) {
     }
 
     const body = {
-        model: opciones.model || OPENAI_MODEL,
-        instructions: mensajes?.find((mensaje) => mensaje?.role === "system")?.content || "",
-        input,
+        model: opciones.model || OPENROUTER_MODEL,
+        messages: mensajesFinales,
+        max_tokens: maxTokens,
         reasoning: {
-            effort: opciones.reasoningEffort || "high"
+            effort:
+                opciones.reasoningEffort ||
+                process.env.OPENROUTER_REASONING ||
+                "high"
         },
-        max_output_tokens: maxOutputTokens,
-        text: {
-            format: {
-                type: "json_schema",
-                name: "roblox_programming_response",
-                strict: true,
-                schema: {
-                    type: "object",
-                    properties: {
-                        reply: {
-                            type: "string"
-                        },
-                        actions: {
-                            type: "array",
-                            items: {
-                                type: "object",
-                                properties: {
-                                    type: {
-                                        type: "string",
-                                        enum: [
-                                            "create_script",
-                                            "create_local_script",
-                                            "create_module_script"
-                                        ]
-                                    },
-                                    path: {
-                                        type: "string"
-                                    },
-                                    name: {
-                                        type: "string"
-                                    },
-                                    code: {
-                                        type: "string"
-                                    }
-                                },
-                                required: ["type", "path", "name", "code"],
-                                additionalProperties: false
-                            }
-                        }
-                    },
-                    required: ["reply", "actions"],
-                    additionalProperties: false
-                }
-            }
-        }
+        response_format: {
+            type: "json_object"
+        },
+        stream: false
     };
 
     const headers = {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
-        Accept: "application/json"
+        Accept: "application/json",
+        "X-Title": "Roblox AI Bridge"
     };
+
+    if (process.env.OPENROUTER_SITE_URL) {
+        headers["HTTP-Referer"] = process.env.OPENROUTER_SITE_URL;
+    }
 
     for (let intento = 1; intento <= maxReintentos; intento++) {
         try {
             const resultado = await fetchJson(
-                OPENAI_URL,
+                OPENROUTER_URL,
                 {
                     method: "POST",
                     headers,
@@ -380,7 +329,7 @@ export async function preguntarGPT6Astra(mensajes, opciones = {}) {
                     const espera = intento * 2500;
 
                     console.warn(
-                        `⚠️ OpenAI ${resultado.response.status}. Reintentando en ${espera / 1000}s...`
+                        `⚠️ OpenRouter ${resultado.response.status}. Reintentando en ${espera / 1000}s...`
                     );
 
                     await sleep(espera);
@@ -388,7 +337,7 @@ export async function preguntarGPT6Astra(mensajes, opciones = {}) {
                 }
 
                 throw new Error(
-                    `OpenAI ${resultado.response.status}: ${mensaje}`
+                    `OpenRouter ${resultado.response.status}: ${mensaje}`
                 );
             }
 
@@ -410,7 +359,7 @@ export async function preguntarGPT6Astra(mensajes, opciones = {}) {
                 const espera = intento * 2500;
 
                 console.warn(
-                    `⚠️ Error temporal de OpenAI. Reintentando en ${espera / 1000}s...`
+                    `⚠️ Error temporal de OpenRouter. Reintentando en ${espera / 1000}s...`
                 );
 
                 await sleep(espera);
@@ -421,7 +370,7 @@ export async function preguntarGPT6Astra(mensajes, opciones = {}) {
         }
     }
 
-    throw new Error("OpenAI agotó todos los reintentos.");
+    throw new Error("OpenRouter agotó todos los reintentos.");
 }
 
-export const GPT6_ASTRA_MODEL = OPENAI_MODEL;
+export const GPT6_ASTRA_MODEL = OPENROUTER_MODEL;
