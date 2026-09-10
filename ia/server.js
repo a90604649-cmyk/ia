@@ -11,15 +11,9 @@ app.use(express.json({ limit: "2mb" }));
 const PORT = Number(process.env.PORT || 3000);
 const CHAT_MODEL = process.env.GEMINI_CHAT_MODEL || "gemini-3.6-flash";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
 if (!GEMINI_API_KEY) {
     console.error("❌ No se encontró GEMINI_API_KEY en el archivo .env");
-    process.exit(1);
-}
-
-if (!NVIDIA_API_KEY) {
-    console.error("❌ No se encontró NVIDIA_API_KEY en el archivo .env");
     process.exit(1);
 }
 
@@ -30,6 +24,7 @@ const ai = new GoogleGenAI({
 let pendingActions = [];
 let r6Calibration = null;
 const historial = [];
+let contextoScriptSeleccionado = null;
 
 const CHAT_SYSTEM =
     "Eres un asistente experto en Roblox Studio y Luau.\n\n" +
@@ -307,8 +302,7 @@ async function prepararTareaConGemini(mensajeUsuario) {
 
         agregarHistorial("model", `Brief técnico enviado al programador:\n${brief}`);
 
-        console.log("\n🧠 Gemini preparó la tarea para DeepSeek.");
-        console.log(brief);
+        console.log("\n🧠 Gemini preparó la tarea.");
 
         return brief;
     } catch (error) {
@@ -568,9 +562,79 @@ function interpretarRespuestaDeepSeek(texto) {
     return extraerFormatoLegacy(texto);
 }
 
+
+function formatearRespuestaFinal(reply) {
+    const texto = String(reply || "")
+        .replace(/\r/g, "")
+        .trim();
+
+    if (!texto) {
+        return "La solicitud fue procesada correctamente.";
+    }
+
+    let lineas = texto
+        .split("\n")
+        .map((linea) => linea.trim())
+        .filter(Boolean);
+
+    if (lineas.length >= 3) {
+        return lineas.slice(0, 4).join("\n");
+    }
+
+    const frases = texto
+        .split(/(?<=[.!?])\s+/)
+        .map((frase) => frase.trim())
+        .filter(Boolean);
+
+    if (frases.length >= 3) {
+        return frases.slice(0, 4).join("\n");
+    }
+
+    return lineas.join("\n");
+}
+
+
+function respuestaFinalBreve(texto) {
+    const limpio = String(texto || "")
+        .replace(/\r/g, " ")
+        .replace(/\n+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (!limpio) {
+        return "La solicitud fue procesada correctamente.";
+    }
+
+    const frases =
+        limpio.match(/[^.!?]+[.!?]+/g)
+        ?.map((frase) => frase.trim())
+        .filter(Boolean) || [limpio];
+
+    return frases.slice(0, 4).join("\n");
+}
+
 async function programarConDeepSeek(mensajeUsuario) {
     const brief = await prepararTareaConGemini(mensajeUsuario);
     const contexto = crearContextoReciente(8);
+
+    let contextoScript = "";
+
+    if (contextoScriptSeleccionado) {
+        contextoScript =
+            "\n\nSCRIPT ACTUAL SELECCIONADO EN ROBLOX STUDIO:\n" +
+            `TIPO: ${contextoScriptSeleccionado.className}\n` +
+            `RUTA: ${contextoScriptSeleccionado.path}\n` +
+            `NOMBRE: ${contextoScriptSeleccionado.name}\n` +
+            "SOURCE ACTUAL:\n" +
+            "----- INICIO SOURCE -----\n" +
+            contextoScriptSeleccionado.source +
+            "\n----- FIN SOURCE -----\n\n" +
+            "IMPORTANTE: Este es el código REAL del script seleccionado. " +
+            "Si el usuario pide modificarlo, trabaja sobre este código existente. " +
+            "Conserva la funcionalidad que no se pidió cambiar y devuelve el archivo completo. " +
+            `Usa exactamente el mismo tipo, ruta y nombre: ${contextoScriptSeleccionado.className}, ` +
+            `${contextoScriptSeleccionado.path}/${contextoScriptSeleccionado.name}.\n`;
+    }
 
     let instruccion =
         "PETICIÓN ORIGINAL DEL USUARIO:\n" +
@@ -581,6 +645,7 @@ async function programarConDeepSeek(mensajeUsuario) {
         "\n\n" +
         "CONTEXTO RECIENTE ADICIONAL:\n" +
         contexto +
+        contextoScript +
         "\n\n" +
         "Ahora implementa la solución. Respeta exactamente el formato JSON solicitado. Si modificas un archivo existente, devuelve su contenido completo.\n";
 
@@ -599,13 +664,11 @@ async function programarConDeepSeek(mensajeUsuario) {
                 }
             ], {
                 reasoningEffort: process.env.DEEPSEEK_REASONING || "high",
-                maxTokens: 16384,
+                maxTokens: 2800,
                 temperature: 0.2,
                 maxReintentos: 3
             });
 
-            console.log("\n[RESPUESTA DE DEEPSEEK]");
-            console.log(texto);
 
             const resultado = interpretarRespuestaDeepSeek(texto);
 
@@ -632,14 +695,8 @@ async function programarConDeepSeek(mensajeUsuario) {
             );
 
             console.log("\n✅ DeepSeek terminó.");
-            console.log(resultado.reply);
-            console.log(`📦 Acciones preparadas: ${pendingActions.length}`);
+            console.log(`📦 ${pendingActions.length} cambios preparados para Roblox Studio.`);
 
-            pendingActions.forEach(function(action, indice) {
-                console.log(
-                    `${indice + 1}. ${action.type} → ${action.path}/${action.name}`
-                );
-            });
 
             return resultado;
         } catch (error) {
@@ -649,6 +706,11 @@ async function programarConDeepSeek(mensajeUsuario) {
 
             console.error("\n❌ Error de DeepSeek:");
             console.error(mensajeError);
+
+            if (mensajeError.includes("OpenRouter 402")) {
+                console.error("💳 Crédito insuficiente para esta petición. No se reintentará.");
+                return null;
+            }
 
             if (intento === 3) {
                 return null;
@@ -744,8 +806,8 @@ app.get("/health", function(_req, res) {
     res.json({
         ok: true,
         geminiConfigured: Boolean(GEMINI_API_KEY),
-        nvidiaConfigured: Boolean(NVIDIA_API_KEY),
-        chatModel: CHAT_MODEL,
+        openrouterConfigured: Boolean(process.env.OPENROUTER_API_KEY),
+                chatModel: CHAT_MODEL,
         programmerModel: DEEPSEEK_MODEL,
         r6Calibrated: Boolean(r6Calibration),
         pendingActions: pendingActions.length
@@ -834,6 +896,71 @@ app.get("/r6-calibration", function(_req, res) {
     });
 });
 
+app.post("/selected-script", function(req, res) {
+    try {
+        const body = req.body;
+
+        if (!body || body.selected !== true) {
+            contextoScriptSeleccionado = null;
+
+            return res.json({
+                ok: true,
+                message: "Contexto de script limpiado."
+            });
+        }
+
+        const tiposPermitidos = new Set([
+            "Script",
+            "LocalScript",
+            "ModuleScript"
+        ]);
+
+        if (
+            !tiposPermitidos.has(body.className) ||
+            typeof body.name !== "string" ||
+            typeof body.path !== "string" ||
+            typeof body.source !== "string"
+        ) {
+            return res.status(400).json({
+                ok: false,
+                error: "Datos del script seleccionado inválidos."
+            });
+        }
+
+        contextoScriptSeleccionado = {
+            className: body.className,
+            name: body.name.trim(),
+            path: body.path.trim(),
+            source: body.source
+        };
+
+        console.log(
+            "📄 Script seleccionado:",
+            `${contextoScriptSeleccionado.path}/${contextoScriptSeleccionado.name}`
+        );
+
+        console.log(
+            "📦 Source recibido:",
+            `${contextoScriptSeleccionado.source.length} caracteres`
+        );
+
+        return res.json({
+            ok: true,
+            message: "Script seleccionado recibido correctamente."
+        });
+    } catch (error) {
+        console.error(
+            "❌ Error recibiendo script seleccionado:",
+            error
+        );
+
+        return res.status(500).json({
+            ok: false,
+            error: "Error interno recibiendo el script."
+        });
+    }
+});
+
 app.get("/next", function(_req, res) {
     const acciones = pendingActions;
     pendingActions = [];
@@ -861,7 +988,7 @@ const rl = readline.createInterface({
 });
 
 console.log("Escribe algo para hablar con el asistente.");
-console.log("Las tareas de programación pasan por Gemini → DeepSeek.");
+console.log("Las tareas de programación pasan por Gemini → OpenRouter → DeepSeek.");
 console.log("Las tareas de animación usan el pipeline R6 existente.");
 console.log("Escribe 'salir' para cerrar.\n");
 
