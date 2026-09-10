@@ -48,6 +48,12 @@ const PROGRAMMER_SYSTEM =
     "- Ejemplo: si existe StarterPlayer/StarterPlayerScripts/SprintController como LocalScript, una actualización de ese archivo debe usar path=StarterPlayer/StarterPlayerScripts y name=SprintController.\n" +
     "- Si existe un hijo StarterPlayer/StarterPlayerScripts/SprintController/SprintController como Script, su actualización debe usar path=StarterPlayer/StarterPlayerScripts/SprintController y name=SprintController.\n" +
     "- Nunca cambies Script por LocalScript ni LocalScript por Script.\n\n" +
+    "DECISIÓN OBLIGATORIA DE OPERACIÓN:\n" +
+    "- ANTES de emitir CADA action, compara obligatoriamente path + name contra el MANIFEST REAL del Project Context.\n" +
+    "- SI YA EXISTE un archivo con ese path + name y el ClassName coincide, DEBES usar update_script, update_local_script o update_module_script.\n" +
+    "- NUNCA uses create_* para un archivo existente.\n" +
+    "- SOLO usa create_* cuando el archivo NO EXISTE en el manifest.\n" +
+    "- Si el usuario pide modificar un sistema existente, los archivos existentes que cambien DEBEN salir como update_* y con SOURCE COMPLETO.\n\n" +
     "CUANDO MODIFIQUES UN SISTEMA EXISTENTE:\n" +
     "- Conserva toda la funcionalidad que el usuario no pidió cambiar.\n" +
     "- Devuelve el SOURCE COMPLETO del archivo actualizado.\n" +
@@ -425,6 +431,152 @@ function extraerResultado(texto) {
     };
 }
 
+async function ajustarAccionesCRUDPorProyecto(resultado) {
+    if (!resultado || !Array.isArray(resultado.actions)) {
+        return resultado;
+    }
+
+    try {
+        const contextPort = Number(process.env.PROJECT_CONTEXT_PORT || 3001);
+        const response = await fetch(
+            `http://127.0.0.1:${contextPort}/project-summary`
+        );
+
+        if (!response.ok) {
+            console.warn(
+                "⚠️ No se pudo validar CRUD contra Project Context; se conserva la respuesta de DeepSeek."
+            );
+            return resultado;
+        }
+
+        const proyecto = await response.json();
+        const manifest = Array.isArray(proyecto.manifest)
+            ? proyecto.manifest
+            : [];
+
+        const existentes = new Map();
+
+        for (const script of manifest) {
+            if (!script?.path || !script?.name || !script?.className) {
+                continue;
+            }
+
+            existentes.set(
+                `${script.path}/${script.name}`,
+                script
+            );
+        }
+
+        const tipoUpdatePorClase = {
+            Script: "update_script",
+            LocalScript: "update_local_script",
+            ModuleScript: "update_module_script"
+        };
+
+        const tipoCreatePorClase = {
+            Script: "create_script",
+            LocalScript: "create_local_script",
+            ModuleScript: "create_module_script"
+        };
+
+        let corregidas = 0;
+
+        const actions = resultado.actions.map((action) => {
+            if (!action || !action.path || !action.name) {
+                return action;
+            }
+
+            if (action.type === "create_folder" || action.type === "delete_folder") {
+                return action;
+            }
+
+            const key = `${action.path}/${action.name}`;
+            const existente = existentes.get(key);
+
+            if (!existente) {
+                if (
+                    (action.type === "update_script" ||
+                        action.type === "update_local_script" ||
+                        action.type === "update_module_script") &&
+                    tipoCreatePorClase[action.className]
+                ) {
+                    corregidas += 1;
+                    console.log(
+                        `🔧 CRUD: ${key} no existe; ${action.type} → ${tipoCreatePorClase[action.className]}.`
+                    );
+                    return {
+                        ...action,
+                        type: tipoCreatePorClase[action.className]
+                    };
+                }
+
+                return action;
+            }
+
+            const claseReal = existente.className;
+            const tipoUpdate = tipoUpdatePorClase[claseReal];
+
+            if (!tipoUpdate) {
+                return action;
+            }
+
+            const esCreate =
+                action.type === "create_script" ||
+                action.type === "create_local_script" ||
+                action.type === "create_module_script";
+
+            const esUpdate =
+                action.type === "update_script" ||
+                action.type === "update_local_script" ||
+                action.type === "update_module_script";
+
+            if (esCreate && action.className === claseReal) {
+                corregidas += 1;
+                console.log(
+                    `🔧 CRUD: ${key} ya existe como ${claseReal}; ${action.type} → ${tipoUpdate}.`
+                );
+                return {
+                    ...action,
+                    type: tipoUpdate,
+                    className: claseReal
+                };
+            }
+
+            if (esUpdate && action.className && action.className !== claseReal) {
+                corregidas += 1;
+                console.log(
+                    `🔧 CRUD: ${key} tiene ClassName real ${claseReal}; corrigiendo ${action.type} → ${tipoUpdate}.`
+                );
+                return {
+                    ...action,
+                    type: tipoUpdate,
+                    className: claseReal
+                };
+            }
+
+            return action;
+        });
+
+        if (corregidas > 0) {
+            console.log(
+                `✅ CRUD: ${corregidas} acción(es) ajustada(s) usando el manifest real del proyecto.`
+            );
+        }
+
+        return {
+            ...resultado,
+            actions
+        };
+    } catch (error) {
+        console.warn(
+            "⚠️ Error validando acciones CRUD contra Project Context:",
+            error instanceof Error ? error.message : String(error)
+        );
+
+        return resultado;
+    }
+}
+
 async function programarConDeepSeek(mensajeUsuario) {
     const brief = await prepararTareaConGemini(mensajeUsuario);
     const contexto = crearContextoReciente(8);
@@ -480,7 +632,7 @@ async function programarConDeepSeek(mensajeUsuario) {
                 maxReintentos: 2
             });
 
-            const resultado = extraerResultado(texto);
+            let resultado = extraerResultado(texto);
 
             if (!resultado) {
                 console.warn("⚠️ DeepSeek no devolvió un resultado interpretable.");
@@ -490,6 +642,8 @@ async function programarConDeepSeek(mensajeUsuario) {
                     "Devuelve ÚNICAMENTE un objeto JSON válido con reply y actions.\n" +
                     "Cada acción debe usar exactamente uno de estos tipos: " +
                     Array.from(TIPOS_CRUD).join(", ") + ".\n" +
+                    "ANTES de cada acción compara path + name contra el MANIFEST REAL: si ya existe y el ClassName coincide, usa update_*; NUNCA create_* para archivos existentes.\n" +
+                    "Solo usa create_* cuando el archivo realmente no exista.\n" +
                     "En update/create usa el ClassName real del contexto y el SOURCE COMPLETO.\n" +
                     "En delete no incluyas code.\n\n" +
                     "PETICIÓN ORIGINAL:\n" +
@@ -501,6 +655,7 @@ async function programarConDeepSeek(mensajeUsuario) {
                 continue;
             }
 
+            resultado = await ajustarAccionesCRUDPorProyecto(resultado);
             pendingActions = resultado.actions;
 
             agregarHistorial(
