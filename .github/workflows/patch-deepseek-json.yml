@@ -15,41 +15,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Patch deepseek.js
+      - name: Patch deepseek.js robustly
         shell: python
         run: |
           from pathlib import Path
+          import re
 
           path = Path('ia/deepseek.js')
           text = path.read_text(encoding='utf-8')
 
-          old_block = '''function limpiarJsonMarkdown(texto) {
-              return String(texto || "")
-                  .trim()
-                  .replace(/^```json\\s*/i, "")
-                  .replace(/^```\\s*/i, "")
-                  .replace(/\\s*```$/i, "")
-                  .trim();
-          }
-
-          function esJsonInterpretable(texto) {
-              const limpio = limpiarJsonMarkdown(texto);
-
-              try {
-                  const objeto = JSON.parse(limpio);
-
-                  return (
-                      objeto &&
-                      typeof objeto === "object" &&
-                      Array.isArray(objeto.actions) &&
-                      typeof objeto.reply !== "undefined"
-                  );
-              } catch {
-                  return false;
-              }
-          }'''
-
-          new_block = '''function limpiarJsonMarkdown(texto) {
+          parser = '''function limpiarJsonMarkdown(texto) {
               return String(texto || "")
                   .trim()
                   .replace(/^```json\\s*/i, "")
@@ -120,10 +95,7 @@ jobs:
                   return JSON.parse(limpio);
               } catch {
                   const objeto = extraerObjetoJson(limpio);
-
-                  if (!objeto) {
-                      return null;
-                  }
+                  if (!objeto) return null;
 
                   try {
                       return JSON.parse(objeto);
@@ -156,38 +128,15 @@ jobs:
               return normalizarJsonRespuesta(texto) !== null;
           }'''
 
-          if old_block not in text:
-              raise SystemExit('No se encontró el bloque del parser JSON esperado en deepseek.js')
+          start = text.find('function limpiarJsonMarkdown(texto) {')
+          end = text.find('export async function preguntarDeepSeek', start)
 
-          text = text.replace(old_block, new_block, 1)
+          if start == -1 or end == -1:
+              raise SystemExit('No se encontró el bloque del parser JSON')
 
-          old_response = '''            const texto = extraerTexto(resultado.data);
+          text = text[:start] + parser + '\n\n' + text[end:]
 
-            if (!esJsonInterpretable(texto)) {
-                ultimoError = new Error(
-                    "DeepSeek terminó la petición, pero la respuesta no contenía el JSON esperado."
-                );
-
-                console.warn(
-                    `⚠️ La clave ${numeroClave} recibió una respuesta no interpretable.`
-                );
-
-                if (indiceClave < claves.length - 1) {
-                    console.warn("↪️ Probando la siguiente clave de OpenRouter...");
-                    await sleep(500);
-                    continue;
-                }
-
-                throw ultimoError;
-            }
-
-            console.log(
-                `✅ DeepSeek respondió correctamente usando la clave ${numeroClave}/${claves.length}.`
-            );
-
-            return texto.trim();'''
-
-          new_response = '''            const texto = extraerTexto(resultado.data);
+          response_block = '''            const texto = extraerTexto(resultado.data);
             const jsonNormalizado = normalizarJsonRespuesta(texto);
 
             if (!jsonNormalizado) {
@@ -219,11 +168,65 @@ jobs:
 
             return jsonNormalizado;'''
 
-          if old_response not in text:
-              raise SystemExit('No se encontró el bloque de respuesta de DeepSeek esperado')
+          pattern = re.compile(
+              r'            const texto = extraerTexto\\(resultado\\.data\\);\\n.*?            return texto\\.trim\\(\\);',
+              re.S,
+          )
 
-          text = text.replace(old_response, new_response, 1)
+          text, count = pattern.subn(response_block, text, count=1)
+          if count != 1:
+              raise SystemExit('No se encontró el bloque de procesamiento de respuesta')
+
+          extraer = '''function extraerTexto(data) {
+              let texto =
+                  data?.choices?.[0]?.message?.content ??
+                  data?.choices?.[0]?.text ??
+                  data?.output_text ??
+                  "";
+
+              if (Array.isArray(texto)) {
+                  texto = texto
+                      .map((parte) => {
+                          if (typeof parte === "string") return parte;
+                          return parte?.text || parte?.content || "";
+                      })
+                      .join("");
+              }
+
+              if (typeof texto !== "string" || !texto.trim()) {
+                  const finishReason = data?.choices?.[0]?.finish_reason;
+                  const usage = data?.usage?.completion_tokens_details;
+
+                  if (finishReason === "length") {
+                      throw new Error(
+                          "DeepSeek agotó el límite de salida antes de terminar el JSON. " +
+                          `Razonamiento usado: ${usage?.reasoning_tokens ?? "desconocido"} tokens.`
+                      );
+                  }
+
+                  throw new Error(
+                      `OpenRouter no devolvió contenido válido: ${obtenerErrorTexto(data)}`
+                  );
+              }
+
+              return texto.trim();
+          }
+
+          export const DEEPSEEK_MODEL = OPENROUTER_MODEL;
+          export { OPENROUTER_MODEL };'''
+
+          start = text.find('function extraerTexto(data) {')
+          end = text.find('export const DEEPSEEK_MODEL', start)
+          if start == -1 or end == -1:
+              raise SystemExit('No se encontró extraerTexto')
+
+          text = text[:start] + extraer + '\n'
           path.write_text(text, encoding='utf-8')
+
+          print('deepseek.js patched successfully')
+
+      - name: Validate syntax
+        run: node --check ia/deepseek.js
 
       - name: Commit patch and remove workflow
         run: |
