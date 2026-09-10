@@ -12,6 +12,21 @@ function sleep(ms) {
     });
 }
 
+function obtenerClavesOpenRouter() {
+    const lista = String(process.env.OPENROUTER_API_KEYS || "")
+        .split(",")
+        .map((clave) => clave.trim())
+        .filter(Boolean);
+
+    const claveIndividual = String(process.env.OPENROUTER_API_KEY || "").trim();
+
+    if (claveIndividual && !lista.includes(claveIndividual)) {
+        lista.unshift(claveIndividual);
+    }
+
+    return [...new Set(lista)];
+}
+
 function obtenerErrorTexto(data) {
     if (!data) {
         return "Error desconocido de OpenRouter.";
@@ -40,6 +55,29 @@ function esReintentable(status, mensaje) {
     const texto = String(mensaje || "").toLowerCase();
 
     return (
+        status === 408 ||
+        status === 425 ||
+        status === 429 ||
+        status === 500 ||
+        status === 502 ||
+        status === 503 ||
+        status === 504 ||
+        texto.includes("temporarily") ||
+        texto.includes("unavailable") ||
+        texto.includes("high demand") ||
+        texto.includes("rate limit") ||
+        texto.includes("overloaded") ||
+        texto.includes("in-flight requests")
+    );
+}
+
+function debeProbarOtraClave(status, mensaje) {
+    const texto = String(mensaje || "").toLowerCase();
+
+    return (
+        status === 401 ||
+        status === 403 ||
+        status === 402 ||
         status === 408 ||
         status === 425 ||
         status === 429 ||
@@ -257,17 +295,13 @@ function esJsonInterpretable(texto) {
 }
 
 export async function preguntarDeepSeek(mensajes, opciones = {}) {
-    const apiKey = process.env.OPENROUTER_API_KEY;
+    const claves = obtenerClavesOpenRouter();
 
-    if (!apiKey) {
+    if (claves.length === 0) {
         throw new Error(
-            "No se encontró OPENROUTER_API_KEY en el archivo .env"
+            "No se encontró ninguna clave. Configura OPENROUTER_API_KEY o OPENROUTER_API_KEYS en el archivo .env"
         );
     }
-
-    // Los reintentos se controlan exclusivamente desde server.js.
-    // Esto evita solicitudes duplicadas/in-flight hacia OpenRouter.
-    const maxReintentos = 1;
 
     const maxTokens = Math.min(
         2800,
@@ -318,21 +352,26 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
         }
     };
 
-    const headers = {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "X-Title": "Roblox AI Bridge"
-    };
+    let ultimoError = null;
 
-    if (process.env.OPENROUTER_SITE_URL) {
-        headers["HTTP-Referer"] = process.env.OPENROUTER_SITE_URL;
-    }
+    for (let indiceClave = 0; indiceClave < claves.length; indiceClave++) {
+        const clave = claves[indiceClave];
+        const numeroClave = indiceClave + 1;
 
-    for (let intento = 1; intento <= maxReintentos; intento++) {
+        const headers = {
+            Authorization: `Bearer ${clave}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            "X-Title": "Roblox AI Bridge"
+        };
+
+        if (process.env.OPENROUTER_SITE_URL) {
+            headers["HTTP-Referer"] = process.env.OPENROUTER_SITE_URL;
+        }
+
         try {
             console.log(
-                `\n🤖 DeepSeek solicitando respuesta a OpenRouter... intento ${intento}/${maxReintentos}`
+                `\n🔑 DeepSeek usando clave OpenRouter ${numeroClave}/${claves.length}`
             );
 
             const resultado = await fetchJson(
@@ -347,47 +386,82 @@ export async function preguntarDeepSeek(mensajes, opciones = {}) {
 
             if (!resultado.response.ok) {
                 const mensaje = obtenerErrorTexto(resultado.data);
+                ultimoError = new Error(
+                    `OpenRouter ${resultado.response.status}: ${mensaje}`
+                );
 
-                if (resultado.response.status === 402) {
-                    throw new Error(
-                        `OpenRouter 402: ${mensaje}`
-                    );
-                }
+                const probarOtra =
+                    indiceClave < claves.length - 1 &&
+                    debeProbarOtraClave(resultado.response.status, mensaje);
 
-                if (
-                    intento < maxReintentos &&
-                    esReintentable(resultado.response.status, mensaje)
-                ) {
-                    const espera = Math.max(5000, intento * 5000);
-
+                if (probarOtra) {
                     console.warn(
-                        `⚠️ OpenRouter ${resultado.response.status}. Esperando ${espera / 1000}s antes de reintentar...`
+                        `⚠️ La clave ${numeroClave} fue rechazada (${resultado.response.status}). Probando la siguiente clave...`
                     );
-
-                    await sleep(espera);
+                    await sleep(750);
                     continue;
                 }
 
-                throw new Error(
-                    `OpenRouter ${resultado.response.status}: ${mensaje}`
-                );
+                throw ultimoError;
             }
 
             const texto = extraerTexto(resultado.data);
 
             if (!esJsonInterpretable(texto)) {
-                throw new Error(
+                ultimoError = new Error(
                     "DeepSeek terminó la petición, pero la respuesta no contenía el JSON esperado."
                 );
+
+                console.warn(
+                    `⚠️ La clave ${numeroClave} recibió una respuesta no interpretable.`
+                );
+
+                if (indiceClave < claves.length - 1) {
+                    console.warn("↪️ Probando la siguiente clave de OpenRouter...");
+                    await sleep(500);
+                    continue;
+                }
+
+                throw ultimoError;
             }
+
+            console.log(
+                `✅ DeepSeek respondió correctamente usando la clave ${numeroClave}/${claves.length}.`
+            );
 
             return texto.trim();
         } catch (error) {
-            throw error;
+            const mensaje =
+                error instanceof Error
+                    ? error.message
+                    : String(error);
+
+            ultimoError = error instanceof Error
+                ? error
+                : new Error(String(error));
+
+            const status402 = mensaje.includes("OpenRouter 402");
+            const temporal =
+                status402 ||
+                esReintentable(0, mensaje) ||
+                mensaje.toLowerCase().includes("fetch failed") ||
+                mensaje.toLowerCase().includes("aborted") ||
+                mensaje.toLowerCase().includes("aborterror");
+
+            if (indiceClave < claves.length - 1 && temporal) {
+                console.warn(
+                    `⚠️ Error con la clave ${numeroClave}/${claves.length}: ${mensaje}`
+                );
+                console.warn("↪️ Probando la siguiente clave de OpenRouter...");
+                await sleep(1000);
+                continue;
+            }
+
+            throw ultimoError;
         }
     }
 
-    throw new Error("OpenRouter agotó los reintentos internos.");
+    throw ultimoError || new Error("Todas las claves de OpenRouter fallaron.");
 }
 
 function extraerTexto(data) {
