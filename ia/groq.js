@@ -5,72 +5,32 @@ const GROQ_MODEL = process.env.GROQ_MODEL || "qwen/qwen3.6-27b";
 const GROQ_REASONING_EFFORT = process.env.GROQ_REASONING_EFFORT || "default";
 const GROQ_REASONING_FORMAT = process.env.GROQ_REASONING_FORMAT || "hidden";
 const DEFAULT_TIMEOUT_MS = Number(process.env.GROQ_TIMEOUT_MS || 300000);
-const DEFAULT_MAX_TOKENS = Math.min(16384, Math.max(1024, Number(process.env.GROQ_MAX_OUTPUT_TOKENS || 16384)));
+const DEFAULT_MAX_TOKENS = Math.min(16384, Math.max(256, Number(process.env.GROQ_MAX_OUTPUT_TOKENS || 16384)));
 const DEFAULT_RETRY_DELAY_MS = Math.max(1000, Number(process.env.GROQ_RETRY_DELAY_MS || 5000));
 const PROJECT_CONTEXT_PORT = Number(process.env.PROJECT_CONTEXT_PORT || 3001);
 const EXTENDED_MARKER = "__ROBLOX_AI_EXTENDED_ACTION__";
 
 const EXTENDED_ACTIONS = new Set([
-    "create_instance",
-    "delete_instance",
-    "set_property",
-    "set_properties",
-    "rename_instance",
-    "move_instance"
+    "create_instance", "delete_instance", "set_property", "set_properties",
+    "rename_instance", "move_instance"
 ]);
 
 const PROPERTY_NAMES = new Set([
-    "Enabled",
-    "Anchored",
-    "CanCollide",
-    "CanTouch",
-    "CanQuery",
-    "Transparency",
-    "Reflectance",
-    "CastShadow",
-    "Massless",
-    "Locked",
-    "Size",
-    "Position",
-    "Orientation",
-    "CFrame",
-    "Color",
-    "Material",
-    "Shape",
-    "Name",
-    "Visible",
-    "Active",
-    "BackgroundTransparency",
-    "BorderSizePixel",
-    "TextTransparency",
-    "TextSize",
-    "ImageTransparency",
-    "Value",
-    "WalkSpeed",
-    "JumpPower",
-    "AutoRotate",
-    "RequiresHandle",
-    "CanBeDropped"
+    "Enabled", "Anchored", "CanCollide", "CanTouch", "CanQuery", "Transparency",
+    "Reflectance", "CastShadow", "Massless", "Locked", "Size", "Position",
+    "Orientation", "CFrame", "Color", "Material", "Shape", "Name", "Visible",
+    "Active", "BackgroundTransparency", "BorderSizePixel", "TextTransparency",
+    "TextSize", "ImageTransparency", "Value", "WalkSpeed", "JumpPower", "AutoRotate",
+    "RequiresHandle", "CanBeDropped"
 ]);
 
 const EXTENDED_PROGRAMMER_RULES = [
-    "EXTENSIÓN DEL BRIDGE: además de las acciones actuales de scripts, carpetas y remotes, puedes modificar instancias y propiedades de Roblox Studio.",
-    "Acciones extendidas permitidas:",
-    "- create_instance: {type, path, name, className, properties?}",
-    "- delete_instance: {type, path, name, className?}",
-    "- set_property: {type, path, name, className?, property, value}",
-    "- set_properties: {type, path, name, className?, properties:{...}}",
-    "- rename_instance: {type, path, name, className?, newName}",
-    "- move_instance: {type, path, name, className?, targetPath}",
-    "Para objetos existentes identifica siempre path + name + ClassName.",
-    "Para crear scripts sigue usando create_script/create_local_script/create_module_script. Para RemoteEvent/RemoteFunction sigue usando sus acciones específicas.",
-    "Para CAMBIAR UNA PROPIEDAD de un objeto existente, SIEMPRE usa set_property o set_properties. NO escribas código Luau para cambiar propiedades.",
-    "EJEMPLO CORRECTO para deshabilitar un LocalScript: {type:'set_property', path:'StarterPlayer/StarterPlayerScripts', name:'MiLocalScript', className:'LocalScript', property:'Enabled', value:false}",
-    "EJEMPLO INCORRECTO: crear/update un script con `script.Enabled = false`, `localScript.Enabled = false` o cualquier asignación equivalente.",
-    "EJEMPLO CORRECTO para habilitar: set_property con property:'Enabled' y value:true.",
-    "Para propiedades usa números, booleanos y strings normales o valores tipados: {type:\"Vector3\",x,y,z}, {type:\"Color3\",r,g,b}, {type:\"CFrame\",x,y,z,rx,ry,rz}, {type:\"UDim2\",xScale,xOffset,yScale,yOffset}, {type:\"Enum\",enum:\"Material\",value:\"ForceField\"}.",
-    "Enabled, Anchored, CanCollide, Transparency, Position, Size, Color, Material y otras propiedades públicas de Roblox pueden modificarse cuando sean válidas para ese objeto.",
-    "Conserva la arquitectura actual y cambia solo lo necesario. Para organizar un sistema puedes combinar create_instance, move_instance, rename_instance y set_property."
+    "Puedes modificar instancias de Roblox Studio además de scripts, carpetas y remotes.",
+    "Acciones: create_instance, delete_instance, set_property, set_properties, rename_instance, move_instance.",
+    "Para propiedades usa siempre set_property/set_properties; nunca escribas script.Enabled = false ni equivalentes dentro del Source.",
+    "Para mover usa move_instance; no uses Parent como propiedad.",
+    "Identifica objetos existentes con path + name + ClassName.",
+    "Conserva la arquitectura actual y modifica solo lo necesario."
 ].join("\n");
 
 let globalCooldownUntil = 0;
@@ -80,17 +40,13 @@ function sleep(ms) {
 }
 
 function obtenerClavesGroq() {
-    const varias = String(process.env.GROQ_API_KEYS || "")
+    const keys = String(process.env.GROQ_API_KEYS || "")
         .split(",")
         .map((key) => key.trim())
         .filter(Boolean);
-    const individual = String(process.env.GROQ_API_KEY || "").trim();
-
-    if (individual && !varias.includes(individual)) {
-        varias.unshift(individual);
-    }
-
-    return [...new Set(varias)];
+    const single = String(process.env.GROQ_API_KEY || "").trim();
+    if (single && !keys.includes(single)) keys.unshift(single);
+    return [...new Set(keys)];
 }
 
 function obtenerErrorTexto(data) {
@@ -101,7 +57,7 @@ function obtenerErrorTexto(data) {
     return JSON.stringify(data);
 }
 
-function esReintentable(status, mensaje) {
+function esRateLimitOReintentable(status, mensaje) {
     const texto = String(mensaje || "").toLowerCase();
     return (
         status === 408 || status === 409 || status === 425 || status === 429 ||
@@ -113,16 +69,17 @@ function esReintentable(status, mensaje) {
     );
 }
 
-function obtenerRetryAfterMs(response) {
-    const retryAfter = response?.headers?.get?.("retry-after");
-    if (!retryAfter) return DEFAULT_RETRY_DELAY_MS;
+function obtenerRetryAfterMs(response, mensaje = "") {
+    const header = response?.headers?.get?.("retry-after");
+    if (header) {
+        const seconds = Number(header);
+        if (Number.isFinite(seconds)) return Math.max(1000, Math.ceil(seconds * 1000));
+        const date = Date.parse(header);
+        if (Number.isFinite(date)) return Math.max(1000, date - Date.now());
+    }
 
-    const segundos = Number(retryAfter);
-    if (Number.isFinite(segundos)) return Math.max(1000, Math.ceil(segundos * 1000));
-
-    const fecha = Date.parse(retryAfter);
-    if (Number.isFinite(fecha)) return Math.max(1000, fecha - Date.now());
-
+    const match = String(mensaje).match(/in\s+(\d+(?:\.\d+)?)s/i);
+    if (match) return Math.max(1000, Math.ceil(Number(match[1]) * 1000));
     return DEFAULT_RETRY_DELAY_MS;
 }
 
@@ -139,19 +96,14 @@ async function fetchJson(url, options, timeoutMs) {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-        const response = await fetch(url, {
-            ...options,
-            signal: controller.signal
-        });
+        const response = await fetch(url, { ...options, signal: controller.signal });
         const text = await response.text();
-        let data = null;
-
+        let data;
         try {
             data = text ? JSON.parse(text) : null;
         } catch {
             data = text;
         }
-
         return { response, data };
     } finally {
         clearTimeout(timer);
@@ -176,15 +128,13 @@ function limpiarMarkdownJson(texto) {
 }
 
 function parsearLiteralSimple(texto) {
-    const valor = String(texto || "").trim();
-    if (valor === "true") return true;
-    if (valor === "false") return false;
-    if (/^-?\d+(\.\d+)?$/.test(valor)) return Number(valor);
-
-    if ((valor.startsWith("\"") && valor.endsWith("\"")) || (valor.startsWith("'") && valor.endsWith("'"))) {
-        return valor.slice(1, -1);
+    const value = String(texto || "").trim();
+    if (value === "true") return true;
+    if (value === "false") return false;
+    if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+    if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+        return value.slice(1, -1);
     }
-
     return null;
 }
 
@@ -196,33 +146,29 @@ function convertirAsignacionPropiedadEnAccion(action) {
     const code = typeof action.code === "string" ? action.code : "";
     if (!code.trim()) return action;
 
-    const lineas = code
+    const lines = code
         .split(/\r?\n/)
-        .map((linea) => linea.trim())
-        .filter((linea) => linea && !linea.startsWith("--") && !linea.startsWith("--["));
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("--") && !line.startsWith("--["));
 
-    if (lineas.length === 0) return action;
+    if (lines.length === 0) return action;
 
-    const propiedades = {};
-
-    for (const linea of lineas) {
-        const match = linea.match(/^(?:[A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z_][A-Za-z0-9_]*)?\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+    const properties = {};
+    for (const line of lines) {
+        const match = line.match(/^(?:[A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z_][A-Za-z0-9_]*)?\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
         if (!match) return action;
 
         const property = match[1];
         const literal = parsearLiteralSimple(match[2]);
-
-        if (!PROPERTY_NAMES.has(property) || literal === null) {
-            return action;
-        }
-
-        propiedades[property] = literal;
+        if (!PROPERTY_NAMES.has(property) || literal === null) return action;
+        properties[property] = literal;
     }
 
-    if (Object.keys(propiedades).length === 0) return action;
+    const entries = Object.entries(properties);
+    if (entries.length === 0) return action;
 
-    if (Object.keys(propiedades).length === 1) {
-        const [property, value] = Object.entries(propiedades)[0];
+    if (entries.length === 1) {
+        const [property, value] = entries[0];
         return {
             type: "set_property",
             path: action.path,
@@ -238,7 +184,7 @@ function convertirAsignacionPropiedadEnAccion(action) {
         path: action.path,
         name: action.name,
         className: action.className,
-        properties: propiedades
+        properties
     };
 }
 
@@ -259,17 +205,13 @@ function empaquetarAccionExtendida(action) {
 }
 
 function adaptarAccionesExtendidas(objeto) {
-    if (!objeto || typeof objeto !== "object" || !Array.isArray(objeto.actions)) {
-        return objeto;
-    }
+    if (!objeto || typeof objeto !== "object" || !Array.isArray(objeto.actions)) return objeto;
 
     objeto.actions = objeto.actions.map((action) => {
         const normalizada = convertirAsignacionPropiedadEnAccion(action);
         if (!normalizada || typeof normalizada !== "object") return action;
-
         const type = String(normalizada.type || "").trim().toLowerCase();
-        if (EXTENDED_ACTIONS.has(type)) return empaquetarAccionExtendida(normalizada);
-        return normalizada;
+        return EXTENDED_ACTIONS.has(type) ? empaquetarAccionExtendida(normalizada) : normalizada;
     });
 
     return objeto;
@@ -278,65 +220,60 @@ function adaptarAccionesExtendidas(objeto) {
 async function enriquecerMensajesProgramador(messages) {
     if (!Array.isArray(messages)) return messages;
 
-    const esProgramador = messages.some((message) =>
+    const isProgrammer = messages.some((message) =>
         message?.role === "system" &&
-        String(message.content || "").includes("Eres el programador profesional de Roblox Studio y Luau")
+        /Eres el programador (principal|profesional) de Roblox Studio y Luau/i.test(String(message.content || ""))
     );
 
-    if (!esProgramador) return messages;
+    if (!isProgrammer) return messages;
 
-    const enriquecidos = messages.map((message) => ({ ...message }));
-    const systemIndex = enriquecidos.findIndex((message) =>
+    const enriched = messages.map((message) => ({ ...message }));
+    const systemIndex = enriched.findIndex((message) =>
         message?.role === "system" &&
-        String(message.content || "").includes("Eres el programador profesional de Roblox Studio y Luau")
+        /Eres el programador (principal|profesional) de Roblox Studio y Luau/i.test(String(message.content || ""))
     );
 
     if (systemIndex >= 0) {
-        enriquecidos[systemIndex].content = [
-            String(enriquecidos[systemIndex].content || ""),
-            EXTENDED_PROGRAMMER_RULES
-        ].join("\n\n");
+        enriched[systemIndex].content = [String(enriched[systemIndex].content || ""), EXTENDED_PROGRAMMER_RULES].join("\n\n");
     }
 
-    const ultimoUsuarioIndex = [...enriquecidos].map((message, index) => ({ message, index }))
+    const userIndex = [...enriched]
+        .map((message, index) => ({ message, index }))
         .reverse()
         .find((item) => item.message?.role === "user")?.index;
 
-    if (ultimoUsuarioIndex == null) return enriquecidos;
+    if (userIndex == null) return enriched;
 
-    const query = String(enriquecidos[ultimoUsuarioIndex].content || "").slice(-12000);
+    const query = String(enriched[userIndex].content || "").slice(-12000);
 
     try {
         const response = await fetch(
             `http://127.0.0.1:${PROJECT_CONTEXT_PORT}/project-context?query=${encodeURIComponent(query)}`,
-            {
-                headers: { Accept: "application/json" },
-                signal: AbortSignal.timeout(8000)
-            }
+            { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8000) }
         );
+        if (!response.ok) return enriched;
 
-        if (!response.ok) return enriquecidos;
         const context = await response.json();
         const objects = Array.isArray(context?.objects) ? context.objects : [];
-        if (objects.length === 0) return enriquecidos;
+        if (objects.length === 0) return enriched;
 
-        const objectLines = objects
-            .slice(0, 500)
+        const lines = objects
+            .slice(0, 120)
             .map((object) => `- ${object.className}: ${object.path}/${object.name}`)
             .join("\n");
 
-        enriquecidos[ultimoUsuarioIndex].content = [
-            enriquecidos[ultimoUsuarioIndex].content,
+        enriched[userIndex].content = [
+            enriched[userIndex].content,
             "",
             "CATÁLOGO REAL DE OBJETOS DE ROBLOX STUDIO:",
-            objectLines,
-            "Usa estas rutas y clases como referencia. No inventes objetos existentes."
+            lines,
+            "Usa únicamente estas rutas y clases como referencia."
         ].join("\n");
     } catch {
-        // El catálogo de objetos es complementario; el flujo principal continúa.
+        // Complementario; el contexto principal ya viaja en el mensaje.
     }
 
-    return enriquecidos;
+    return enriched;
 }
 
 export function parsearRespuestaJson(texto) {
@@ -349,7 +286,6 @@ export function parsearRespuestaJson(texto) {
         const inicio = limpio.indexOf("{");
         const fin = limpio.lastIndexOf("}");
         if (inicio === -1 || fin <= inicio) return null;
-
         try {
             objeto = JSON.parse(limpio.slice(inicio, fin + 1));
         } catch {
@@ -360,28 +296,16 @@ export function parsearRespuestaJson(texto) {
     return adaptarAccionesExtendidas(objeto);
 }
 
-export async function preguntarGroq(messages, options = {}) {
-    const keys = obtenerClavesGroq();
-    if (keys.length === 0) {
-        throw new Error("No se encontró GROQ_API_KEY ni GROQ_API_KEYS en el archivo .env");
-    }
-
-    const maxCompletionTokens = Math.min(
-        16384,
-        Math.max(256, Number(options.maxCompletionTokens || DEFAULT_MAX_TOKENS))
-    );
-
-    const preparedMessages = await enriquecerMensajesProgramador(messages);
-
+function crearBody(messages, options, forzarTexto = false) {
     const body = {
         model: options.model || GROQ_MODEL,
-        messages: Array.isArray(preparedMessages) ? preparedMessages : [],
+        messages: Array.isArray(messages) ? messages : [],
         temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0.6,
-        max_completion_tokens: maxCompletionTokens,
+        max_completion_tokens: Math.min(16384, Math.max(256, Number(options.maxCompletionTokens || DEFAULT_MAX_TOKENS))),
         stream: false
     };
 
-    if (options.json === true) {
+    if (options.json === true && !forzarTexto) {
         body.response_format = { type: "json_object" };
         body.reasoning_format = "hidden";
         body.reasoning_effort = options.reasoningEffort || GROQ_REASONING_EFFORT;
@@ -390,8 +314,25 @@ export async function preguntarGroq(messages, options = {}) {
         body.reasoning_format = options.reasoningFormat || GROQ_REASONING_FORMAT;
     }
 
+    return body;
+}
+
+function esFalloJson400(status, mensaje) {
+    if (status !== 400) return false;
+    const text = String(mensaje || "").toLowerCase();
+    return text.includes("failed to generate json") ||
+        text.includes("failed to validate json") ||
+        text.includes("adjust your prompt") ||
+        text.includes("generated json");
+}
+
+export async function preguntarGroq(messages, options = {}) {
+    const keys = obtenerClavesGroq();
+    if (keys.length === 0) throw new Error("No se encontró GROQ_API_KEY ni GROQ_API_KEYS en el archivo .env");
+
+    const preparedMessages = await enriquecerMensajesProgramador(messages);
+    const attemptsPerKey = Math.max(1, Number(options.attemptsPerKey || 1));
     let lastError = null;
-    const attemptsPerKey = Math.max(1, Number(options.attemptsPerKey || 2));
 
     for (let keyIndex = 0; keyIndex < keys.length; keyIndex++) {
         const key = keys[keyIndex];
@@ -399,8 +340,7 @@ export async function preguntarGroq(messages, options = {}) {
         for (let attempt = 1; attempt <= attemptsPerKey; attempt++) {
             try {
                 await esperarCooldownGlobal();
-
-                const result = await fetchJson(
+                let result = await fetchJson(
                     GROQ_URL,
                     {
                         method: "POST",
@@ -409,75 +349,84 @@ export async function preguntarGroq(messages, options = {}) {
                             "Content-Type": "application/json",
                             Accept: "application/json"
                         },
-                        body: JSON.stringify(body)
+                        body: JSON.stringify(crearBody(preparedMessages, options, false))
                     },
                     Number(options.timeoutMs || DEFAULT_TIMEOUT_MS)
                 );
 
                 if (!result.response.ok) {
                     const message = obtenerErrorTexto(result.data);
-                    lastError = new Error(`Groq ${result.response.status}: ${message}`);
 
-                    if (result.response.status === 429) {
-                        const espera = obtenerRetryAfterMs(result.response);
-                        globalCooldownUntil = Date.now() + espera;
+                    if (esFalloJson400(result.response.status, message) && options.json === true) {
+                        console.warn("⚠️ Groq rechazó JSON Object Mode. Reintentando en modo texto y parseando localmente...");
 
-                        console.warn(`⚠️ Groq rate limit (429). Reintento permitido en ~${Math.ceil(espera / 1000)}s.`);
+                        const fallbackMessages = [
+                            ...preparedMessages,
+                            {
+                                role: "system",
+                                content: "IMPORTANTE: responde únicamente con un objeto JSON válido con exactamente las claves reply y actions. No uses markdown ni texto fuera del JSON. Mantén las acciones lo más compactas posible."
+                            }
+                        ];
 
-                        if (attempt < attemptsPerKey) {
-                            await sleep(espera);
-                            continue;
-                        }
-
-                        if (keyIndex < keys.length - 1) {
-                            console.warn(`⚠️ Probando la siguiente clave de Groq (${keyIndex + 2}/${keys.length}) después del cooldown.`);
-                            break;
-                        }
-
-                        throw lastError;
-                    }
-
-                    if (esReintentable(result.response.status, message)) {
-                        const espera = Math.max(
-                            DEFAULT_RETRY_DELAY_MS,
-                            Math.min(30000, 1000 * Math.pow(2, attempt - 1))
+                        result = await fetchJson(
+                            GROQ_URL,
+                            {
+                                method: "POST",
+                                headers: {
+                                    Authorization: `Bearer ${key}`,
+                                    "Content-Type": "application/json",
+                                    Accept: "application/json"
+                                },
+                                body: JSON.stringify(crearBody(fallbackMessages, { ...options, json: false }, true))
+                            },
+                            Number(options.timeoutMs || DEFAULT_TIMEOUT_MS)
                         );
 
+                        if (result.response.ok) {
+                            const text = extraerTexto(result.data);
+                            console.log(`✅ Groq respondió con ${options.model || GROQ_MODEL} usando fallback de texto.`);
+                            return text;
+                        }
+                    }
+
+                    const finalMessage = obtenerErrorTexto(result.data);
+                    lastError = new Error(`Groq ${result.response.status}: ${finalMessage}`);
+
+                    if (result.response.status === 429) {
+                        const wait = obtenerRetryAfterMs(result.response, finalMessage);
+                        globalCooldownUntil = Date.now() + wait;
+                        console.warn(`⚠️ Groq rate limit (429). Reintento permitido en ~${Math.ceil(wait / 1000)}s.`);
                         if (attempt < attemptsPerKey) {
-                            console.warn(`⚠️ Groq temporalmente no disponible (${result.response.status}). Reintentando en ${Math.ceil(espera / 1000)}s...`);
-                            await sleep(espera);
+                            await sleep(wait);
                             continue;
                         }
-
                         if (keyIndex < keys.length - 1) break;
+                    }
+
+                    if (esRateLimitOReintentable(result.response.status, finalMessage) && attempt < attemptsPerKey) {
+                        const wait = Math.max(DEFAULT_RETRY_DELAY_MS, Math.min(30000, 1000 * (2 ** (attempt - 1))));
+                        await sleep(wait);
+                        continue;
                     }
 
                     throw lastError;
                 }
 
                 const text = extraerTexto(result.data);
-                console.log(`✅ Groq respondió con ${body.model}.`);
+                console.log(`✅ Groq respondió con ${options.model || GROQ_MODEL}.`);
                 return text;
             } catch (error) {
                 lastError = error instanceof Error ? error : new Error(String(error));
                 const message = lastError.message.toLowerCase();
-                const networkError =
-                    message.includes("fetch failed") ||
-                    message.includes("aborted") ||
-                    message.includes("aborterror") ||
-                    message.includes("socket") ||
-                    message.includes("timeout");
+                const networkError = message.includes("fetch failed") || message.includes("abort") || message.includes("socket") || message.includes("timeout");
 
-                if ((networkError || esReintentable(0, message)) && attempt < attemptsPerKey) {
-                    const espera = Math.max(
-                        DEFAULT_RETRY_DELAY_MS,
-                        Math.min(30000, 1000 * Math.pow(2, attempt - 1))
-                    );
-                    await sleep(espera);
+                if ((networkError || esRateLimitOReintentable(0, message)) && attempt < attemptsPerKey) {
+                    const wait = Math.max(DEFAULT_RETRY_DELAY_MS, Math.min(30000, 1000 * (2 ** (attempt - 1))));
+                    await sleep(wait);
                     continue;
                 }
 
-                if ((networkError || esReintentable(0, message)) && keyIndex < keys.length - 1) break;
+                if (keyIndex < keys.length - 1 && (networkError || esRateLimitOReintentable(0, message))) break;
                 throw lastError;
             }
         }
