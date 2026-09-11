@@ -1,7 +1,7 @@
 {
   "name": "ia",
-  "version": "1.0.0",
-  "description": "Roblox AI bridge with Gemini orchestration and DeepSeek V4 Pro programming",
+  "version": "1.1.0",
+  "description": "Roblox AI bridge with Groq Qwen 3.6 for reasoning, coding and R6 animation generation",
   "main": "server.js",
   "scripts": {
     "start": "node start.js"
@@ -9,9 +9,11 @@
   "keywords": [
     "roblox",
     "luau",
-    "gemini",
-    "deepseek",
-    "openrouter"
+    "groq",
+    "qwen",
+    "coding",
+    "reasoning",
+    "animations"
   ],
   "author": "",
   "license": "ISC",
@@ -20,7 +22,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@google/genai": "^2.21.0",
     "dotenv": "^16.0.0",
     "express": "^5.0.0"
   }
