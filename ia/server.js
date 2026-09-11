@@ -177,15 +177,35 @@ function construirContextoProyecto(proyecto) {
     const objects = Array.isArray(proyecto.objects) ? proyecto.objects : [];
     const selected = Array.isArray(proyecto.selected) ? proyecto.selected : [];
 
-    const manifestTexto = manifest
-        .map((s) => `- ${s.className}: ${s.path}/${s.name} (${s.size} chars)`)
+    const compactManifest = manifest
+        .slice(0, 35)
+        .map((s) => `- ${s.className}: ${s.path}/${s.name}`)
         .join("\n");
 
-    const objectsTexto = objects
-        .map((o) => `- ${o.className}: ${o.path}/${o.name}`)
+    const query = String(proyecto.query || "").toLowerCase();
+
+    const tokens = query
+        .split(/[^a-z0-9áéíóúñ_]+/i)
+        .filter((x) => x.length >= 3);
+
+    const relevantObjects = objects
+        .map((object) => {
+            const text = `${object.className} ${object.name} ${object.path}`.toLowerCase();
+            let score = 0;
+
+            for (const token of tokens) {
+                if (text.includes(token)) score += 1;
+            }
+
+            return { object, score };
+        })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 80)
+        .map(({ object }) => `- ${object.className}: ${object.path}/${object.name}`)
         .join("\n");
 
     const sourceTexto = selected
+        .slice(0, 4)
         .map((s, i) => [
             `### SOURCE RELEVANTE ${i + 1}`,
             `TIPO: ${s.className}`,
@@ -193,30 +213,33 @@ function construirContextoProyecto(proyecto) {
             `NOMBRE: ${s.name}`,
             `SEÑALES: ${Array.isArray(s.signals) ? s.signals.join(", ") : ""}`,
             "----- INICIO SOURCE -----",
-            s.source || "",
+            String(s.source || "").slice(0, 2500),
             "----- FIN SOURCE -----"
         ].join("\n"))
         .join("\n\n");
 
-    return [
+    const contexto = [
         "CONTEXTO REAL DE ROBLOX STUDIO:",
-        `Scripts detectados: ${proyecto.totalScripts ?? manifest.length}`,
-        `Objetos detectados: ${proyecto.totalObjects ?? objects.length}`,
+        `Scripts totales detectados: ${proyecto.totalScripts ?? manifest.length}`,
+        `Objetos totales detectados: ${proyecto.totalObjects ?? objects.length}`,
         "",
-        "MANIFEST DE SCRIPTS:",
-        manifestTexto || "(ninguno)",
+        "MANIFEST COMPACTO:",
+        compactManifest || "(ninguno)",
         "",
-        "OBJETOS EXISTENTES:",
-        objectsTexto || "(ninguno)",
+        "OBJETOS RELEVANTES:",
+        relevantObjects || "(ninguno)",
         "",
         "SOURCE RELEVANTE:",
         sourceTexto || "(ninguno seleccionado)",
         "",
-        "RECUERDA:",
-        "El proyecto anterior al cambio es la fuente de verdad.",
-        "Para propiedades usa set_property/set_properties, no código dentro del Script.",
-        "Para mover objetos usa move_instance."
+        "REGLAS:",
+        "- El SOURCE recibido es real.",
+        "- Usa path + name + ClassName para identificar objetos.",
+        "- No inventes objetos existentes.",
+        "- Mantén intacta la funcionalidad no relacionada."
     ].join("\n");
+
+    return contexto.slice(0, 22000);
 }
 
 function construirContextoSeleccionado() {
@@ -351,7 +374,8 @@ async function procesarProgramacion(mensajeUsuario, soloAnalisis = false) {
             "No devuelvas código genérico.",
             "No pidas al usuario que pegue scripts que ya estén presentes en el contexto.",
             "Analiza los scripts relevantes que recibiste, explica cómo funciona actualmente el sistema, qué archivos están relacionados, qué problemas o conflictos ves y qué cambios recomendarías después.",
-            "actions DEBE ser []."
+            "actions DEBE ser [].",
+            "La respuesta de SOLO ANÁLISIS debe ser texto normal y legible, NO JSON, NO markdown de código y NO código para copiar."
         ].join("\n")
         : [
             "MODO: IMPLEMENTACIÓN.",
@@ -383,24 +407,26 @@ async function procesarProgramacion(mensajeUsuario, soloAnalisis = false) {
                 { role: "user", content: contenido }
             ],
             {
-                json: true,
-                reasoningEffort: soloAnalisis ? "low" : (process.env.GROQ_REASONING_EFFORT || "default"),
+                json: !soloAnalisis,
+                reasoningEffort: "none",
                 reasoningFormat: "hidden",
                 temperature: 0.3,
-                maxCompletionTokens: soloAnalisis ? 700 : Math.min(900, Number(process.env.GROQ_MAX_OUTPUT_TOKENS || 900)),
+                maxCompletionTokens: soloAnalisis ? 850 : Math.min(550, Number(process.env.GROQ_MAX_OUTPUT_TOKENS || 550)),
                 timeoutMs: Number(process.env.GROQ_TIMEOUT_MS || 300000),
                 attemptsPerKey: 1
             }
         );
 
-        const resultado = extraerResultado(texto);
+        const resultado = soloAnalisis
+            ? {
+                reply: String(texto || "").trim(),
+                actions: []
+            }
+            : extraerResultado(texto);
+
         if (!resultado) {
             console.warn("⚠️ Groq no devolvió el JSON esperado.");
             return null;
-        }
-
-        if (soloAnalisis) {
-            resultado.actions = [];
         }
 
         pendingActions = resultado.actions;

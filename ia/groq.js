@@ -368,7 +368,7 @@ export async function preguntarGroq(messages, options = {}) {
 
     const maxCompletionTokens = Math.min(
         16384,
-        Math.max(1024, Number(options.maxCompletionTokens || DEFAULT_MAX_TOKENS))
+        Math.max(256, Number(options.maxCompletionTokens || DEFAULT_MAX_TOKENS))
     );
 
     const preparedMessages = await enriquecerMensajesProgramador(messages);
