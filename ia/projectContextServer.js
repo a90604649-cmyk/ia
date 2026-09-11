@@ -3,9 +3,9 @@ import express from "express";
 
 const app = express();
 const PORT = Number(process.env.PROJECT_CONTEXT_PORT || 3001);
+const HOST = process.env.PROJECT_CONTEXT_HOST || "0.0.0.0";
 const MAX_SOURCE_CHARS = 350000;
-const MAX_SCRIPTS = 1200;
-const MAX_OBJECTS = 2000;
+const MAX_SCRIPTS = 1000;
 
 app.use(express.json({ limit: "20mb" }));
 
@@ -13,40 +13,48 @@ const scripts = new Map();
 const objects = new Map();
 let lastScanAt = 0;
 
-function shouldIgnore(item) {
-    const text = `${item?.name || ""} ${item?.path || ""}`.toLowerCase();
+function shouldIgnore(text) {
+    const value = String(text || "").toLowerCase();
     return (
-        text.includes("geminibridgeplugin") ||
-        text.includes("roblox ai bridge") ||
-        text.includes("projectcontext") ||
-        text.includes("project context")
+        value.includes("geminibridgeplugin") ||
+        value.includes("roblox ai bridge") ||
+        value.includes("projectcontext") ||
+        value.includes("project context")
     );
 }
 
-function normalizeScript(raw) {
-    if (!raw || typeof raw !== "object") return null;
+function normalizeScript(script) {
+    if (!script || typeof script !== "object") return null;
 
-    const className = String(raw.className || "").trim();
+    const className = String(script.className || "").trim();
     if (!["Script", "LocalScript", "ModuleScript"].includes(className)) return null;
 
-    const name = String(raw.name || "").trim();
-    const path = String(raw.path || "").trim();
-    const source = String(raw.source || "");
+    const name = String(script.name || "").trim();
+    const path = String(script.path || "").trim();
+    const source = String(script.source || "");
 
-    if (!name || !path || source.length > MAX_SOURCE_CHARS || path.includes("..")) return null;
-    if (shouldIgnore({ name, path })) return null;
+    if (!name || !path || source.length > MAX_SOURCE_CHARS) return null;
+    if (path.includes("..") || shouldIgnore(`${name} ${path}`)) return null;
 
-    return { className, name, path, source, size: source.length };
+    return {
+        className,
+        name,
+        path,
+        source,
+        size: source.length
+    };
 }
 
-function normalizeObject(raw) {
-    if (!raw || typeof raw !== "object") return null;
-    const className = String(raw.className || "").trim();
+function normalizeObject(object) {
+    if (!object || typeof object !== "object") return null;
+
+    const className = String(object.className || "").trim();
     if (!["RemoteEvent", "RemoteFunction"].includes(className)) return null;
 
-    const name = String(raw.name || "").trim();
-    const path = String(raw.path || "").trim();
-    if (!name || !path || path.includes("..") || shouldIgnore({ name, path })) return null;
+    const name = String(object.name || "").trim();
+    const path = String(object.path || "").trim();
+
+    if (!name || !path || path.includes("..") || shouldIgnore(`${name} ${path}`)) return null;
 
     return { className, name, path };
 }
@@ -70,7 +78,7 @@ function expandTerms(tokens) {
         ["animacion", "animation", "animate", "anim", "keyframe", "pose"],
         ["herramienta", "tool", "equip", "equipped", "handle"],
         ["energia", "energy", "stamina", "fatigue", "regen", "regeneration"],
-        ["remote", "remoteevent", "remotefunction", "event", "function"]
+        ["remoto", "remote", "remoteevent", "remotefunction", "evento", "eventos"]
     ];
 
     for (const group of groups) {
@@ -86,6 +94,7 @@ function scoreScript(script, queryTerms) {
     const nameTokens = tokenize(script.name);
     const pathTokens = tokenize(script.path);
     const sourceLower = script.source.toLowerCase();
+
     let score = 0;
     const signals = [];
 
@@ -107,11 +116,12 @@ function scoreScript(script, queryTerms) {
 
     if (script.className === "LocalScript") score += 2;
     if (script.className === "ModuleScript") score += 1;
+
     return { score, signals: [...new Set(signals)] };
 }
 
 function buildManifest() {
-    return [...scripts.values()].map((script) => ({
+    return Array.from(scripts.values()).map((script) => ({
         className: script.className,
         name: script.name,
         path: script.path,
@@ -120,34 +130,35 @@ function buildManifest() {
 }
 
 function buildObjects() {
-    return [...objects.values()];
+    return Array.from(objects.values()).map((object) => ({
+        className: object.className,
+        name: object.name,
+        path: object.path
+    }));
 }
 
 function selectRelevantScripts(query) {
     const queryTerms = expandTerms(tokenize(query));
-    const ranked = [...scripts.values()].map((script) => {
+    const ranked = Array.from(scripts.values()).map((script) => {
         const scored = scoreScript(script, queryTerms);
         return { script, score: scored.score, signals: scored.signals };
     });
 
     ranked.sort((a, b) => b.score - a.score || `${a.script.path}/${a.script.name}`.localeCompare(`${b.script.path}/${b.script.name}`));
 
-    const selected = ranked.filter((item) => item.score > 0).slice(0, 16);
-    const selectedKeys = new Set(selected.map((item) => `${item.script.path}/${item.script.name}`));
+    const selected = ranked.filter((item) => item.score > 0).slice(0, 18);
+    const selectedKeys = new Set(selected.map((item) => `${item.script.path}/${item.script.name}`.toLowerCase()));
 
     for (const candidate of ranked) {
-        if (selected.length >= 20) break;
+        if (selected.length >= 24) break;
         if (candidate.score > 0) continue;
 
-        const referenced = selected.some((item) => {
-            const source = item.script.source.toLowerCase();
-            return source.includes(candidate.script.name.toLowerCase());
-        });
-
         const key = `${candidate.script.path}/${candidate.script.name}`;
-        if (referenced && !selectedKeys.has(key)) {
+        const referenced = selected.some((item) => item.script.source.toLowerCase().includes(candidate.script.name.toLowerCase()));
+
+        if (referenced && !selectedKeys.has(key.toLowerCase())) {
             selected.push(candidate);
-            selectedKeys.add(key);
+            selectedKeys.add(key.toLowerCase());
         }
     }
 
@@ -168,6 +179,7 @@ app.post("/project-scan", (req, res) => {
 
         let accepted = 0;
         let rejected = 0;
+        let objectAccepted = 0;
 
         for (const rawScript of body.scripts) {
             const script = normalizeScript(rawScript);
@@ -175,6 +187,7 @@ app.post("/project-scan", (req, res) => {
                 rejected += 1;
                 continue;
             }
+
             scripts.set(`${script.path}/${script.name}`, script);
             accepted += 1;
         }
@@ -184,21 +197,21 @@ app.post("/project-scan", (req, res) => {
                 const object = normalizeObject(rawObject);
                 if (!object) continue;
                 objects.set(`${object.path}/${object.name}`, object);
+                objectAccepted += 1;
             }
         }
 
         if (scripts.size > MAX_SCRIPTS) {
-            const keys = [...scripts.keys()].sort();
-            while (keys.length > MAX_SCRIPTS) scripts.delete(keys.pop());
-        }
-
-        if (objects.size > MAX_OBJECTS) {
-            const keys = [...objects.keys()].sort();
-            while (keys.length > MAX_OBJECTS) objects.delete(keys.pop());
+            const entries = Array.from(scripts.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+            while (entries.length > MAX_SCRIPTS) {
+                const [key] = entries.pop();
+                scripts.delete(key);
+            }
         }
 
         lastScanAt = Date.now();
-        console.log(`🔎 Escaneo: +${accepted} scripts | ${scripts.size} scripts | ${objects.size} remotes.`);
+
+        console.log(`🔎 Escaneo: +${accepted} scripts | ${scripts.size} scripts | +${objectAccepted} remotos | ${objects.size} objetos.`);
 
         return res.json({
             ok: true,
@@ -222,6 +235,7 @@ app.get("/project-context", (req, res) => {
             ok: true,
             query,
             totalScripts: scripts.size,
+            totalObjects: objects.size,
             lastScanAt,
             manifest: buildManifest(),
             objects: buildObjects(),
@@ -252,11 +266,30 @@ app.get("/project-summary", (_req, res) => {
     });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, HOST, () => {
     console.log("=================================");
     console.log("🔎 ROBLOX PROJECT CONTEXT SERVER");
     console.log("=================================");
-    console.log(`Contexto: http://127.0.0.1:${PORT}`);
+    console.log(`Contexto: http://${HOST}:${PORT}`);
     console.log("Scripts + RemoteEvent + RemoteFunction detectados.");
     console.log("=================================\n");
+});
+
+server.on("error", (error) => {
+    console.error("❌ Project Context no pudo abrir el servidor:", error);
+    console.error("   Puerto:", PORT);
+    console.error("   Host:", HOST);
+    process.exitCode = 1;
+});
+
+server.on("close", () => {
+    console.error("⚠️ Project Context cerró el listener HTTP inesperadamente.");
+});
+
+process.on("uncaughtException", (error) => {
+    console.error("❌ uncaughtException en Project Context:", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+    console.error("❌ unhandledRejection en Project Context:", reason);
 });
