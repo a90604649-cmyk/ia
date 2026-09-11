@@ -12,6 +12,10 @@ const GROQ_SWITCH_THRESHOLD = Math.max(
     0,
     Number(process.env.OPENROUTER_SWITCH_REMAINING_TOKENS || 700)
 );
+const GROQ_INPUT_SOFT_LIMIT = Math.max(
+    1000,
+    Number(process.env.GROQ_INPUT_SOFT_LIMIT || 6200)
+);
 const HANDOFF_ENABLED = String(process.env.OPENROUTER_HANDOFF || "true").toLowerCase() !== "false";
 
 let groqRemainingTokens = null;
@@ -41,6 +45,17 @@ function leerJsonBody(options) {
     } catch {
         return null;
     }
+}
+
+function estimarTokensEntrada(body) {
+    const messages = Array.isArray(body?.messages) ? body.messages : [];
+    const texto = messages
+        .map((message) => `${message?.role || ""}\n${String(message?.content || "")}`)
+        .join("\n");
+
+    // Estimación conservadora. No reemplaza el tokenizer real de Groq,
+    // pero evita enviar cargas claramente superiores al límite conocido.
+    return Math.ceil(texto.length / 3.1) + 100;
 }
 
 function clonarResponse(text, response) {
@@ -74,7 +89,7 @@ function crearHandoffMessages(messages, reason) {
     const handoff = [
         "HANDOFF AUTOMÁTICO ENTRE PROVEEDORES.",
         `El proveedor primario Groq/Qwen no puede continuar esta generación (${reason}).`,
-        "Continúa la MISMA tarea del usuario desde cero con el contexto recibido.",
+        "Continúa la MISMA tarea del usuario con el contexto recibido.",
         "No inventes archivos, objetos, rutas ni SOURCE que no aparezcan en el contexto.",
         "Tu salida será ejecutada por un bridge de Roblox Studio.",
         "No expliques el proceso de handoff.",
@@ -167,7 +182,7 @@ async function solicitarOpenRouter(originalBody, reason) {
 }
 
 function esFalloTemporalGroq(status) {
-    return [408, 409, 425, 429, 500, 502, 503, 504].includes(Number(status));
+    return [408, 409, 413, 425, 429, 500, 502, 503, 504].includes(Number(status));
 }
 
 globalThis.fetch = async function providerAwareFetch(url, options = {}) {
@@ -178,9 +193,21 @@ globalThis.fetch = async function providerAwareFetch(url, options = {}) {
     const body = leerJsonBody(options);
     const programming = esProgramacion(body?.messages);
 
-    if (programming && groqEstaCercaDelLimite()) {
-        const switched = await solicitarOpenRouter(body, `Groq deja ${groqRemainingTokens} tokens`);
-        if (switched) return switched;
+    if (programming) {
+        const estimatedInputTokens = estimarTokensEntrada(body);
+
+        if (estimatedInputTokens >= GROQ_INPUT_SOFT_LIMIT) {
+            const switched = await solicitarOpenRouter(
+                body,
+                `entrada estimada de ${estimatedInputTokens} tokens supera el umbral de ${GROQ_INPUT_SOFT_LIMIT}`
+            );
+            if (switched) return switched;
+        }
+
+        if (groqEstaCercaDelLimite()) {
+            const switched = await solicitarOpenRouter(body, `Groq deja ${groqRemainingTokens} tokens`);
+            if (switched) return switched;
+        }
     }
 
     const response = await realFetch(url, options);
@@ -219,5 +246,5 @@ globalThis.fetch = async function providerAwareFetch(url, options = {}) {
 };
 
 console.log(
-    `🔀 Provider Router: Groq ${GROQ_SWITCH_THRESHOLD}t → OpenRouter ${OPENROUTER_MODEL}`
+    `🔀 Provider Router: Groq ${GROQ_SWITCH_THRESHOLD}t / entrada ${GROQ_INPUT_SOFT_LIMIT}t → OpenRouter ${OPENROUTER_MODEL}`
 );
