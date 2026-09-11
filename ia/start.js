@@ -13,7 +13,7 @@ function iniciar(nombre, archivo, reintento = 0) {
 
     console.log(`[${nombre}] iniciando ${archivo}...`);
 
-    const proceso = spawn(process.execPath, [archivo], {
+    const proceso = spawn(process.execPath, ["--require", "./provider-router.cjs", archivo], {
         stdio: "inherit",
         env: process.env,
         cwd: process.cwd()
@@ -78,7 +78,7 @@ process.stdin.resume();
 console.log("=================================");
 console.log("🚀 ROBLOX AI BRIDGE");
 console.log("=================================");
-console.log("Groq + Qwen 3.6 27B");
+console.log("Groq + Qwen 3.6 27B + OpenRouter fallback");
 console.log("Project Context: puerto 3001");
 console.log("Roblox AI: puerto 3000");
 console.log("=================================\n");
