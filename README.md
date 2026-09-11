@@ -2,7 +2,7 @@
 
 Puente Node.js para Roblox Studio con un único proveedor de IA: **Groq + Qwen 3.6 27B**.
 
-El mismo modelo se usa para conversación, razonamiento de programación, corrección de bugs, creación de sistemas, cambios en varios scripts y generación de animaciones R6.
+El mismo modelo se usa para conversación, razonamiento, corrección de bugs y programación de sistemas Roblox/Luau.
 
 ## Configuración
 
@@ -32,37 +32,27 @@ npm install
 npm start
 ```
 
-El servidor queda en `http://127.0.0.1:3000`.
+El servidor principal queda en `http://127.0.0.1:3000` y el contexto del proyecto en `http://127.0.0.1:3001`.
 
-## Flujo de programación
+## Plugin
 
-Usuario → Groq/Qwen analiza y razona → identifica los archivos reales del Project Context → genera los cambios completos → el bridge valida las acciones → Roblox Studio consulta `/next`.
+El plugin actualizado está en `ia/RobloxAIBridgePlugin.lua`.
 
-Las acciones de programación usan:
+Reemplaza el código del plugin antiguo por ese archivo. Ya no usa Gemini, OpenRouter ni DeepSeek.
 
-- `create_script`
-- `create_local_script`
-- `create_module_script`
-- `update_script`
-- `update_local_script`
-- `update_module_script`
-- `delete_script`
-- `delete_local_script`
-- `delete_module_script`
-- `create_folder`
-- `delete_folder`
+## Capacidades
 
-Cuando se modifica un sistema existente, Qwen recibe el manifest y el SOURCE real de los archivos relevantes. El bridge vuelve a comprobar `path + name + ClassName` antes de entregar las acciones para evitar crear un script que ya existe o modificar el tipo equivocado.
+Qwen recibe el contexto real del proyecto y puede preparar acciones para:
 
-## Animaciones R6
+- crear, actualizar y eliminar `Script`, `LocalScript` y `ModuleScript`;
+- crear y eliminar `RemoteEvent` y `RemoteFunction`;
+- crear y eliminar carpetas;
+- modificar varios scripts de un mismo sistema cuando sea necesario.
 
-Las animaciones también se generan con `qwen/qwen3.6-27b`, usando reasoning y salida JSON. El pipeline conserva la calibración R6, la memoria de referencias y la validación de partes/keyframes.
+El plugin aplica `path + name + ClassName` y no pisa un script existente mediante `create_*`.
 
-## Endpoints
+## Flujo
 
-- `GET /` estado general del bridge.
-- `GET /health` estado de configuración de Groq.
-- `POST /r6-calibration` recibe la calibración R6.
-- `GET /r6-calibration` devuelve la calibración actual.
-- `POST /selected-script` recibe el script seleccionado desde Roblox Studio.
-- `GET /next` entrega y limpia las acciones pendientes para Roblox Studio.
+Usuario → Groq/Qwen razona → Project Context aporta el SOURCE real → Qwen genera acciones → bridge valida → Roblox Studio aplica los cambios.
+
+Las respuestas programáticas incluyen `reply` para indicar qué se diagnosticó y qué se cambió, además de `actions` para ejecutar los cambios reales.
