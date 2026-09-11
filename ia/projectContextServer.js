@@ -6,12 +6,22 @@ const PORT = Number(process.env.PROJECT_CONTEXT_PORT || 3001);
 const HOST = process.env.PROJECT_CONTEXT_HOST || "0.0.0.0";
 const MAX_SOURCE_CHARS = 350000;
 const MAX_SCRIPTS = 1000;
+const MAX_OBJECTS = 5000;
 
 app.use(express.json({ limit: "20mb" }));
 
 const scripts = new Map();
 const objects = new Map();
 let lastScanAt = 0;
+
+const ALLOWED_OBJECT_CLASSES = new Set([
+    "Folder", "Model", "Part", "MeshPart", "UnionOperation", "Tool",
+    "RemoteEvent", "RemoteFunction", "BindableEvent", "BindableFunction",
+    "Attachment", "Motor6D", "WeldConstraint", "ProximityPrompt",
+    "ScreenGui", "Frame", "TextLabel", "TextButton", "TextBox",
+    "ImageLabel", "ImageButton", "Camera", "Humanoid", "HumanoidRootPart",
+    "Sound", "Animation", "AnimationController", "ValueBase"
+]);
 
 function shouldIgnore(text) {
     const value = String(text || "").toLowerCase();
@@ -36,20 +46,14 @@ function normalizeScript(script) {
     if (!name || !path || source.length > MAX_SOURCE_CHARS) return null;
     if (path.includes("..") || shouldIgnore(`${name} ${path}`)) return null;
 
-    return {
-        className,
-        name,
-        path,
-        source,
-        size: source.length
-    };
+    return { className, name, path, source, size: source.length };
 }
 
 function normalizeObject(object) {
     if (!object || typeof object !== "object") return null;
 
     const className = String(object.className || "").trim();
-    if (!["RemoteEvent", "RemoteFunction"].includes(className)) return null;
+    if (!ALLOWED_OBJECT_CLASSES.has(className)) return null;
 
     const name = String(object.name || "").trim();
     const path = String(object.path || "").trim();
@@ -71,14 +75,19 @@ function tokenize(text) {
 function expandTerms(tokens) {
     const result = new Set(tokens);
     const groups = [
-        ["correr", "corre", "sprint", "run", "running", "stamina", "walkspeed", "movement", "velocidad", "shift"],
-        ["combate", "combat", "ataque", "attack", "punch", "hit", "damage", "block", "fighting"],
+        ["correr", "corre", "sprint", "run", "running", "stamina", "walkspeed", "movement", "movimiento", "velocidad", "shift"],
+        ["combate", "combat", "ataque", "attack", "punch", "hit", "damage", "block", "fighting", "arma", "weapon"],
         ["inventario", "inventory", "item", "items", "backpack", "hotbar"],
         ["salto", "jump", "jumping", "air", "doublejump"],
         ["animacion", "animation", "animate", "anim", "keyframe", "pose"],
         ["herramienta", "tool", "equip", "equipped", "handle"],
         ["energia", "energy", "stamina", "fatigue", "regen", "regeneration"],
-        ["remoto", "remote", "remoteevent", "remotefunction", "evento", "eventos"]
+        ["remoto", "remote", "remoteevent", "remotefunction", "evento", "eventos"],
+        ["camara", "camera", "camaras", "currentcamera", "firstperson", "first", "persona", "mouse", "aim", "apuntar", "apuntado", "zoom", "fov"],
+        ["jugador", "player", "players", "character", "personaje", "humanoid", "humanoidrootpart", "localplayer"],
+        ["jugar", "juego", "play", "game", "gameplay", "jugabilidad"],
+        ["gui", "screen", "interface", "ui", "menu"],
+        ["fisica", "physics", "collision", "collide", "anchored", "part", "mesh", "model"]
     ];
 
     for (const group of groups) {
@@ -100,56 +109,77 @@ function scoreScript(script, queryTerms) {
 
     for (const term of queryTerms) {
         if (nameTokens.includes(term)) {
-            score += 40;
+            score += 45;
             signals.push(`nombre:${term}`);
         }
         if (pathTokens.includes(term)) {
-            score += 25;
+            score += 30;
             signals.push(`ruta:${term}`);
         }
         const occurrences = sourceLower.split(term).length - 1;
         if (occurrences > 0) {
-            score += Math.min(occurrences * 3, 24);
+            score += Math.min(occurrences * 3, 30);
             signals.push(`codigo:${term}`);
         }
     }
 
-    if (script.className === "LocalScript") score += 2;
-    if (script.className === "ModuleScript") score += 1;
+    if (script.className === "LocalScript") score += 4;
+    if (script.className === "ModuleScript") score += 2;
 
     return { score, signals: [...new Set(signals)] };
 }
 
+function scoreObject(object, queryTerms) {
+    const nameTokens = tokenize(object.name);
+    const pathTokens = tokenize(object.path);
+    let score = 0;
+
+    for (const term of queryTerms) {
+        if (nameTokens.includes(term)) score += 45;
+        if (pathTokens.includes(term)) score += 25;
+    }
+
+    if (["RemoteEvent", "RemoteFunction"].includes(object.className)) score += 1;
+    return score;
+}
+
 function buildManifest() {
-    return Array.from(scripts.values()).map((script) => ({
-        className: script.className,
-        name: script.name,
-        path: script.path,
-        size: script.size
-    }));
+    return Array.from(scripts.values())
+        .map((script) => ({
+            className: script.className,
+            name: script.name,
+            path: script.path,
+            size: script.size
+        }))
+        .sort((a, b) => `${a.path}/${a.name}`.localeCompare(`${b.path}/${b.name}`));
 }
 
 function buildObjects() {
-    return Array.from(objects.values()).map((object) => ({
-        className: object.className,
-        name: object.name,
-        path: object.path
-    }));
+    return Array.from(objects.values())
+        .map((object) => ({
+            className: object.className,
+            name: object.name,
+            path: object.path
+        }))
+        .sort((a, b) => `${a.path}/${a.name}`.localeCompare(`${b.path}/${b.name}`));
 }
 
 function selectRelevantScripts(query) {
     const queryTerms = expandTerms(tokenize(query));
-    const ranked = Array.from(scripts.values()).map((script) => {
+    const rankedScripts = Array.from(scripts.values()).map((script) => {
         const scored = scoreScript(script, queryTerms);
         return { script, score: scored.score, signals: scored.signals };
     });
 
-    ranked.sort((a, b) => b.score - a.score || `${a.script.path}/${a.script.name}`.localeCompare(`${b.script.path}/${b.script.name}`));
+    rankedScripts.sort((a, b) =>
+        b.score - a.score ||
+        `${a.script.path}/${a.script.name}`.localeCompare(`${b.script.path}/${b.script.name}`)
+    );
 
-    const selected = ranked.filter((item) => item.score > 0).slice(0, 18);
+    const selected = rankedScripts.filter((item) => item.score > 0).slice(0, 16);
     const selectedKeys = new Set(selected.map((item) => `${item.script.path}/${item.script.name}`.toLowerCase()));
 
-    for (const candidate of ranked) {
+    for (const candidate of rankedScripts) {
         if (selected.length >= 24) break;
         if (candidate.score > 0) continue;
 
@@ -162,7 +192,17 @@ function selectRelevantScripts(query) {
         }
     }
 
-    return { queryTerms: [...queryTerms], selected };
+    const rankedObjects = Array.from(objects.values())
+        .map((object) => ({ object, score: scoreObject(object, queryTerms) }))
+        .sort((a, b) => b.score - a.score || `${a.object.path}/${a.object.name}`.localeCompare(`${b.object.path}/${b.object.name}`));
+
+    const relevantObjects = rankedObjects.slice(0, 120).map((item) => item.object);
+
+    return {
+        queryTerms: [...queryTerms],
+        selected,
+        relevantObjects
+    };
 }
 
 app.post("/project-scan", (req, res) => {
@@ -187,7 +227,6 @@ app.post("/project-scan", (req, res) => {
                 rejected += 1;
                 continue;
             }
-
             scripts.set(`${script.path}/${script.name}`, script);
             accepted += 1;
         }
@@ -209,9 +248,17 @@ app.post("/project-scan", (req, res) => {
             }
         }
 
+        if (objects.size > MAX_OBJECTS) {
+            const entries = Array.from(objects.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+            while (entries.length > MAX_OBJECTS) {
+                const [key] = entries.pop();
+                objects.delete(key);
+            }
+        }
+
         lastScanAt = Date.now();
 
-        console.log(`🔎 Escaneo: +${accepted} scripts | ${scripts.size} scripts | +${objectAccepted} remotos | ${objects.size} objetos.`);
+        console.log(`🔎 Escaneo: +${accepted} scripts | ${scripts.size} scripts | +${objectAccepted} objetos | ${objects.size} objetos.`);
 
         return res.json({
             ok: true,
@@ -238,7 +285,7 @@ app.get("/project-context", (req, res) => {
             totalObjects: objects.size,
             lastScanAt,
             manifest: buildManifest(),
-            objects: buildObjects(),
+            objects: result.relevantObjects,
             selected: result.selected.map((item) => ({
                 className: item.script.className,
                 name: item.script.name,
@@ -271,7 +318,7 @@ const server = app.listen(PORT, HOST, () => {
     console.log("🔎 ROBLOX PROJECT CONTEXT SERVER");
     console.log("=================================");
     console.log(`Contexto: http://${HOST}:${PORT}`);
-    console.log("Scripts + RemoteEvent + RemoteFunction detectados.");
+    console.log("Scripts + objetos + RemoteEvent + RemoteFunction detectados.");
     console.log("=================================\n");
 });
 
