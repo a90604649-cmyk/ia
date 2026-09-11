@@ -6,6 +6,9 @@ const GROQ_REASONING_EFFORT = process.env.GROQ_REASONING_EFFORT || "default";
 const GROQ_REASONING_FORMAT = process.env.GROQ_REASONING_FORMAT || "hidden";
 const DEFAULT_TIMEOUT_MS = Number(process.env.GROQ_TIMEOUT_MS || 300000);
 const DEFAULT_MAX_TOKENS = Math.min(16384, Math.max(1024, Number(process.env.GROQ_MAX_OUTPUT_TOKENS || 16384)));
+const DEFAULT_RETRY_DELAY_MS = Math.max(1000, Number(process.env.GROQ_RETRY_DELAY_MS || 5000));
+
+let globalCooldownUntil = 0;
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -52,6 +55,31 @@ function esReintentable(status, mensaje) {
         texto.includes("timeout") ||
         texto.includes("timed out")
     );
+}
+
+function obtenerRetryAfterMs(response) {
+    const retryAfter = response?.headers?.get?.("retry-after");
+    if (!retryAfter) return DEFAULT_RETRY_DELAY_MS;
+
+    const segundos = Number(retryAfter);
+    if (Number.isFinite(segundos)) {
+        return Math.max(1000, Math.ceil(segundos * 1000));
+    }
+
+    const fecha = Date.parse(retryAfter);
+    if (Number.isFinite(fecha)) {
+        return Math.max(1000, fecha - Date.now());
+    }
+
+    return DEFAULT_RETRY_DELAY_MS;
+}
+
+async function esperarCooldownGlobal() {
+    const restante = globalCooldownUntil - Date.now();
+    if (restante > 0) {
+        console.warn(`⏳ Groq en cooldown. Esperando ${Math.ceil(restante / 1000)}s...`);
+        await sleep(restante);
+    }
 }
 
 async function fetchJson(url, options, timeoutMs) {
@@ -125,6 +153,8 @@ export async function preguntarGroq(messages, options = {}) {
         throw new Error("No se encontró GROQ_API_KEY ni GROQ_API_KEYS en el archivo .env");
     }
 
+    await esperarCooldownGlobal();
+
     const maxCompletionTokens = Math.min(
         16384,
         Math.max(1024, Number(options.maxCompletionTokens || DEFAULT_MAX_TOKENS))
@@ -143,13 +173,10 @@ export async function preguntarGroq(messages, options = {}) {
     if (options.json === true) {
         body.response_format = { type: "json_object" };
         body.reasoning_format = "hidden";
+        body.reasoning_effort = options.reasoningEffort || GROQ_REASONING_EFFORT;
     } else {
         body.reasoning_effort = options.reasoningEffort || GROQ_REASONING_EFFORT;
         body.reasoning_format = options.reasoningFormat || GROQ_REASONING_FORMAT;
-    }
-
-    if (options.json === true) {
-        body.reasoning_effort = options.reasoningEffort || GROQ_REASONING_EFFORT;
     }
 
     let lastError = null;
@@ -160,6 +187,8 @@ export async function preguntarGroq(messages, options = {}) {
 
         for (let attempt = 1; attempt <= attemptsPerKey; attempt++) {
             try {
+                await esperarCooldownGlobal();
+
                 const result = await fetchJson(
                     GROQ_URL,
                     {
@@ -178,15 +207,42 @@ export async function preguntarGroq(messages, options = {}) {
                     const message = obtenerErrorTexto(result.data);
                     lastError = new Error(`Groq ${result.response.status}: ${message}`);
 
-                    if (esReintentable(result.response.status, message)) {
+                    if (result.response.status === 429) {
+                        const espera = obtenerRetryAfterMs(result.response);
+                        globalCooldownUntil = Date.now() + espera;
+
+                        console.warn(
+                            `⚠️ Groq rate limit (429). Reintento permitido en ~${Math.ceil(espera / 1000)}s.`
+                        );
+
                         if (attempt < attemptsPerKey) {
-                            console.warn(`⚠️ Groq temporalmente no disponible (${result.response.status}). Reintentando...`);
-                            await sleep(attempt * 1200);
+                            await sleep(espera);
                             continue;
                         }
 
                         if (keyIndex < keys.length - 1) {
-                            console.warn(`⚠️ Cambiando a la siguiente clave de Groq (${keyIndex + 2}/${keys.length}).`);
+                            console.warn(`⚠️ Probando la siguiente clave de Groq (${keyIndex + 2}/${keys.length}) después del cooldown.`);
+                            break;
+                        }
+
+                        throw lastError;
+                    }
+
+                    if (esReintentable(result.response.status, message)) {
+                        const espera = Math.max(
+                            DEFAULT_RETRY_DELAY_MS,
+                            Math.min(30000, 1000 * Math.pow(2, attempt - 1))
+                        );
+
+                        if (attempt < attemptsPerKey) {
+                            console.warn(
+                                `⚠️ Groq temporalmente no disponible (${result.response.status}). Reintentando en ${Math.ceil(espera / 1000)}s...`
+                            );
+                            await sleep(espera);
+                            continue;
+                        }
+
+                        if (keyIndex < keys.length - 1) {
                             break;
                         }
                     }
@@ -208,7 +264,11 @@ export async function preguntarGroq(messages, options = {}) {
                     message.includes("timeout");
 
                 if ((networkError || esReintentable(0, message)) && attempt < attemptsPerKey) {
-                    await sleep(attempt * 1200);
+                    const espera = Math.max(
+                        DEFAULT_RETRY_DELAY_MS,
+                        Math.min(30000, 1000 * Math.pow(2, attempt - 1))
+                    );
+                    await sleep(espera);
                     continue;
                 }
 
