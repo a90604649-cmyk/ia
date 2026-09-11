@@ -7,6 +7,33 @@ const GROQ_REASONING_FORMAT = process.env.GROQ_REASONING_FORMAT || "hidden";
 const DEFAULT_TIMEOUT_MS = Number(process.env.GROQ_TIMEOUT_MS || 300000);
 const DEFAULT_MAX_TOKENS = Math.min(16384, Math.max(1024, Number(process.env.GROQ_MAX_OUTPUT_TOKENS || 16384)));
 const DEFAULT_RETRY_DELAY_MS = Math.max(1000, Number(process.env.GROQ_RETRY_DELAY_MS || 5000));
+const PROJECT_CONTEXT_PORT = Number(process.env.PROJECT_CONTEXT_PORT || 3001);
+const EXTENDED_MARKER = "__ROBLOX_AI_EXTENDED_ACTION__";
+
+const EXTENDED_ACTIONS = new Set([
+    "create_instance",
+    "delete_instance",
+    "set_property",
+    "set_properties",
+    "rename_instance",
+    "move_instance"
+]);
+
+const EXTENDED_PROGRAMMER_RULES = [
+    "EXTENSIÓN DEL BRIDGE: además de las acciones actuales de scripts, carpetas y remotes, puedes modificar instancias y propiedades de Roblox Studio.",
+    "Acciones extendidas permitidas:",
+    "- create_instance: {type, path, name, className, properties?}",
+    "- delete_instance: {type, path, name, className?}",
+    "- set_property: {type, path, name, className?, property, value}",
+    "- set_properties: {type, path, name, className?, properties:{...}}",
+    "- rename_instance: {type, path, name, className?, newName}",
+    "- move_instance: {type, path, name, className?, targetPath}",
+    "Para objetos existentes identifica siempre path + name + ClassName.",
+    "Para crear scripts sigue usando create_script/create_local_script/create_module_script. Para RemoteEvent/RemoteFunction sigue usando sus acciones específicas.",
+    "Para propiedades usa números, booleanos y strings normales o valores tipados: {type:\"Vector3\",x,y,z}, {type:\"Color3\",r,g,b}, {type:\"CFrame\",x,y,z,rx,ry,rz}, {type:\"UDim2\",xScale,xOffset,yScale,yOffset}, {type:\"Enum\",enum:\"Material\",value:\"ForceField\"}.",
+    "Enabled, Anchored, CanCollide, Transparency, Position, Size, Color, Material y otras propiedades públicas de Roblox pueden modificarse cuando sean válidas para ese objeto.",
+    "Conserva la arquitectura actual y cambia solo lo necesario. Para organizar un sistema puedes combinar create_instance, move_instance, rename_instance y set_property."
+].join("\n");
 
 let globalCooldownUntil = 0;
 
@@ -39,20 +66,11 @@ function obtenerErrorTexto(data) {
 function esReintentable(status, mensaje) {
     const texto = String(mensaje || "").toLowerCase();
     return (
-        status === 408 ||
-        status === 409 ||
-        status === 425 ||
-        status === 429 ||
-        status === 500 ||
-        status === 502 ||
-        status === 503 ||
-        status === 504 ||
-        texto.includes("rate limit") ||
-        texto.includes("too many requests") ||
-        texto.includes("temporarily") ||
-        texto.includes("overloaded") ||
-        texto.includes("unavailable") ||
-        texto.includes("timeout") ||
+        status === 408 || status === 409 || status === 425 || status === 429 ||
+        status === 500 || status === 502 || status === 503 || status === 504 ||
+        texto.includes("rate limit") || texto.includes("too many requests") ||
+        texto.includes("temporarily") || texto.includes("overloaded") ||
+        texto.includes("unavailable") || texto.includes("timeout") ||
         texto.includes("timed out")
     );
 }
@@ -62,14 +80,10 @@ function obtenerRetryAfterMs(response) {
     if (!retryAfter) return DEFAULT_RETRY_DELAY_MS;
 
     const segundos = Number(retryAfter);
-    if (Number.isFinite(segundos)) {
-        return Math.max(1000, Math.ceil(segundos * 1000));
-    }
+    if (Number.isFinite(segundos)) return Math.max(1000, Math.ceil(segundos * 1000));
 
     const fecha = Date.parse(retryAfter);
-    if (Number.isFinite(fecha)) {
-        return Math.max(1000, fecha - Date.now());
-    }
+    if (Number.isFinite(fecha)) return Math.max(1000, fecha - Date.now());
 
     return DEFAULT_RETRY_DELAY_MS;
 }
@@ -108,11 +122,9 @@ async function fetchJson(url, options, timeoutMs) {
 
 function extraerTexto(data) {
     const text = data?.choices?.[0]?.message?.content ?? "";
-
     if (typeof text !== "string" || !text.trim()) {
         throw new Error(`Groq no devolvió contenido válido: ${obtenerErrorTexto(data)}`);
     }
-
     return text.trim();
 }
 
@@ -125,47 +137,139 @@ function limpiarMarkdownJson(texto) {
         .trim();
 }
 
-export function parsearRespuestaJson(texto) {
-    const limpio = limpiarMarkdownJson(texto);
+function empaquetarAccionExtendida(action) {
+    const payload = {
+        ...action,
+        type: String(action.type || "").trim().toLowerCase(),
+        __extended: true
+    };
+
+    return {
+        type: "update_script",
+        className: "Script",
+        name: String(action.name || "__RobloxAIBridgeExtendedAction__"),
+        path: String(action.path || "ReplicatedStorage"),
+        code: `${EXTENDED_MARKER}\n${JSON.stringify(payload)}`
+    };
+}
+
+function adaptarAccionesExtendidas(objeto) {
+    if (!objeto || typeof objeto !== "object" || !Array.isArray(objeto.actions)) {
+        return objeto;
+    }
+
+    objeto.actions = objeto.actions.map((action) => {
+        if (!action || typeof action !== "object") return action;
+        const type = String(action.type || "").trim().toLowerCase();
+        if (EXTENDED_ACTIONS.has(type)) return empaquetarAccionExtendida(action);
+        return action;
+    });
+
+    return objeto;
+}
+
+async function enriquecerMensajesProgramador(messages) {
+    if (!Array.isArray(messages)) return messages;
+
+    const esProgramador = messages.some((message) =>
+        message?.role === "system" &&
+        String(message.content || "").includes("Eres el programador principal de Roblox Studio")
+    );
+
+    if (!esProgramador) return messages;
+
+    const enriquecidos = messages.map((message) => ({ ...message }));
+    const systemIndex = enriquecidos.findIndex((message) =>
+        message?.role === "system" &&
+        String(message.content || "").includes("Eres el programador principal de Roblox Studio")
+    );
+
+    if (systemIndex >= 0) {
+        enriquecidos[systemIndex].content = [
+            String(enriquecidos[systemIndex].content || ""),
+            EXTENDED_PROGRAMMER_RULES
+        ].join("\n\n");
+    }
+
+    const ultimoUsuarioIndex = [...enriquecidos].map((message, index) => ({ message, index }))
+        .reverse()
+        .find((item) => item.message?.role === "user")?.index;
+
+    if (ultimoUsuarioIndex == null) return enriquecidos;
+
+    const query = String(enriquecidos[ultimoUsuarioIndex].content || "").slice(-12000);
 
     try {
-        return JSON.parse(limpio);
+        const response = await fetch(
+            `http://127.0.0.1:${PROJECT_CONTEXT_PORT}/project-context?query=${encodeURIComponent(query)}`,
+            {
+                headers: { Accept: "application/json" },
+                signal: AbortSignal.timeout(8000)
+            }
+        );
+
+        if (!response.ok) return enriquecidos;
+        const context = await response.json();
+        const objects = Array.isArray(context?.objects) ? context.objects : [];
+        if (objects.length === 0) return enriquecidos;
+
+        const objectLines = objects
+            .slice(0, 500)
+            .map((object) => `- ${object.className}: ${object.path}/${object.name}`)
+            .join("\n");
+
+        enriquecidos[ultimoUsuarioIndex].content = [
+            enriquecidos[ultimoUsuarioIndex].content,
+            "",
+            "CATÁLOGO REAL DE OBJETOS DE ROBLOX STUDIO:",
+            objectLines,
+            "Usa estas rutas y clases como referencia. No inventes objetos existentes."
+        ].join("\n");
+    } catch {
+        // El catálogo de objetos es complementario; el flujo principal continúa.
+    }
+
+    return enriquecidos;
+}
+
+export function parsearRespuestaJson(texto) {
+    const limpio = limpiarMarkdownJson(texto);
+    let objeto = null;
+
+    try {
+        objeto = JSON.parse(limpio);
     } catch {
         const inicio = limpio.indexOf("{");
         const fin = limpio.lastIndexOf("}");
-
-        if (inicio === -1 || fin <= inicio) {
-            return null;
-        }
+        if (inicio === -1 || fin <= inicio) return null;
 
         try {
-            return JSON.parse(limpio.slice(inicio, fin + 1));
+            objeto = JSON.parse(limpio.slice(inicio, fin + 1));
         } catch {
             return null;
         }
     }
+
+    return adaptarAccionesExtendidas(objeto);
 }
 
 export async function preguntarGroq(messages, options = {}) {
     const keys = obtenerClavesGroq();
-
     if (keys.length === 0) {
         throw new Error("No se encontró GROQ_API_KEY ni GROQ_API_KEYS en el archivo .env");
     }
-
-    await esperarCooldownGlobal();
 
     const maxCompletionTokens = Math.min(
         16384,
         Math.max(1024, Number(options.maxCompletionTokens || DEFAULT_MAX_TOKENS))
     );
 
+    const preparedMessages = await enriquecerMensajesProgramador(messages);
+
     const body = {
         model: options.model || GROQ_MODEL,
-        messages: Array.isArray(messages) ? messages : [],
-        temperature: Number.isFinite(Number(options.temperature))
-            ? Number(options.temperature)
-            : 0.6,
+        messages: Array.isArray(preparedMessages) ? preparedMessages : [],
+        temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0.6,
         max_completion_tokens: maxCompletionTokens,
         stream: false
     };
@@ -211,9 +315,7 @@ export async function preguntarGroq(messages, options = {}) {
                         const espera = obtenerRetryAfterMs(result.response);
                         globalCooldownUntil = Date.now() + espera;
 
-                        console.warn(
-                            `⚠️ Groq rate limit (429). Reintento permitido en ~${Math.ceil(espera / 1000)}s.`
-                        );
+                        console.warn(`⚠️ Groq rate limit (429). Reintento permitido en ~${Math.ceil(espera / 1000)}s.`);
 
                         if (attempt < attemptsPerKey) {
                             await sleep(espera);
@@ -235,16 +337,12 @@ export async function preguntarGroq(messages, options = {}) {
                         );
 
                         if (attempt < attemptsPerKey) {
-                            console.warn(
-                                `⚠️ Groq temporalmente no disponible (${result.response.status}). Reintentando en ${Math.ceil(espera / 1000)}s...`
-                            );
+                            console.warn(`⚠️ Groq temporalmente no disponible (${result.response.status}). Reintentando en ${Math.ceil(espera / 1000)}s...`);
                             await sleep(espera);
                             continue;
                         }
 
-                        if (keyIndex < keys.length - 1) {
-                            break;
-                        }
+                        if (keyIndex < keys.length - 1) break;
                     }
 
                     throw lastError;
@@ -272,10 +370,7 @@ export async function preguntarGroq(messages, options = {}) {
                     continue;
                 }
 
-                if ((networkError || esReintentable(0, message)) && keyIndex < keys.length - 1) {
-                    break;
-                }
-
+                if ((networkError || esReintentable(0, message)) && keyIndex < keys.length - 1) break;
                 throw lastError;
             }
         }
