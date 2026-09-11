@@ -19,10 +19,13 @@ local conectado = false
 local consultando = false
 local escaneando = false
 local ultimoEscaneo = 0
-local INTERVALO_ESCANEO = 20
+local INTERVALO_ESCANEO = 300
+
 local MAX_SOURCE_CHARS = 340000
 local MAX_BATCH_CHARS = 700000
 local MAX_SCRIPTS_PER_BATCH = 25
+local MAX_OBJECTS = 1500
+local EXTENDED_MARKER = "__ROBLOX_AI_EXTENDED_ACTION__"
 
 local SERVICIOS = {
     ServerScriptService = game:GetService("ServerScriptService"),
@@ -39,11 +42,6 @@ local SERVICIOS = {
     TextChatService = game:GetService("TextChatService"),
     Chat = game:GetService("Chat")
 }
-
-local BASES = {}
-for nombre in pairs(SERVICIOS) do
-    table.insert(BASES, nombre)
-end
 
 local TIPOS_SCRIPT = {
     create_script = "Script",
@@ -62,6 +60,53 @@ local TIPOS_REMOTOS = {
     create_remote_function = "RemoteFunction",
     delete_remote_event = "RemoteEvent",
     delete_remote_function = "RemoteFunction"
+}
+
+local CLASES_OBJETOS = {
+    Folder = true,
+    Model = true,
+    Part = true,
+    MeshPart = true,
+    UnionOperation = true,
+    Tool = true,
+    RemoteEvent = true,
+    RemoteFunction = true,
+    BindableEvent = true,
+    BindableFunction = true,
+    Attachment = true,
+    Motor6D = true,
+    WeldConstraint = true,
+    ProximityPrompt = true,
+    ScreenGui = true,
+    Frame = true,
+    TextLabel = true,
+    TextButton = true,
+    TextBox = true,
+    ImageLabel = true,
+    ImageButton = true
+}
+
+local CLASES_CREABLES = {
+    Folder = true,
+    Model = true,
+    Part = true,
+    MeshPart = true,
+    Tool = true,
+    RemoteEvent = true,
+    RemoteFunction = true,
+    BindableEvent = true,
+    BindableFunction = true,
+    Attachment = true,
+    Motor6D = true,
+    WeldConstraint = true,
+    ProximityPrompt = true,
+    ScreenGui = true,
+    Frame = true,
+    TextLabel = true,
+    TextButton = true,
+    TextBox = true,
+    ImageLabel = true,
+    ImageButton = true
 }
 
 local function debeIgnorar(objeto)
@@ -104,6 +149,14 @@ local function obtenerContenedor(ruta, crearCarpetas)
     return actual
 end
 
+local function obtenerInstancia(ruta, nombre)
+    local contenedor = obtenerContenedor(ruta, false)
+    if not contenedor or type(nombre) ~= "string" or nombre == "" then
+        return nil
+    end
+    return contenedor:FindFirstChild(nombre)
+end
+
 local function obtenerRutaDesdeRaiz(objeto, raiz, nombreRaiz)
     local partes = {}
     local actual = objeto
@@ -141,6 +194,7 @@ local function obtenerSource(objeto)
     local ok, source = pcall(function()
         return ScriptEditorService:GetEditorSource(objeto)
     end)
+
     if ok and type(source) == "string" then
         return source
     end
@@ -148,6 +202,7 @@ local function obtenerSource(objeto)
     local okFallback, sourceFallback = pcall(function()
         return objeto.Source
     end)
+
     if okFallback and type(sourceFallback) == "string" then
         return sourceFallback
     end
@@ -187,14 +242,14 @@ end
 
 local function recolectarObjetosImportantes()
     local resultado = {}
-    local clases = {
-        RemoteEvent = true,
-        RemoteFunction = true
-    }
 
     for _, raiz in pairs(SERVICIOS) do
         for _, objeto in ipairs(raiz:GetDescendants()) do
-            if not debeIgnorar(objeto) and clases[objeto.ClassName] then
+            if #resultado >= MAX_OBJECTS then
+                break
+            end
+
+            if not debeIgnorar(objeto) and CLASES_OBJETOS[objeto.ClassName] then
                 local ruta = obtenerRuta(objeto)
                 if ruta then
                     table.insert(resultado, {
@@ -272,6 +327,7 @@ local function escanearProyecto()
     end
 
     escaneando = true
+
     local scripts = recolectarScripts()
     local objects = recolectarObjetosImportantes()
     local lotes = dividirLotes(scripts)
@@ -291,7 +347,7 @@ local function escanearProyecto()
 
     if correcto then
         ultimoEscaneo = os.clock()
-        print("[Roblox AI] ✅ Contexto actualizado:", #scripts, "scripts |", #objects, "remotos")
+        print("[Roblox AI] ✅ Contexto actualizado:", #scripts, "scripts |", #objects, "objetos detectados")
     end
 
     escaneando = false
@@ -353,16 +409,17 @@ local function ejecutarScriptAction(action)
 
     local ruta = tostring(action.path or "")
     local nombre = tostring(action.name or "")
-    local existenteContenedor = obtenerContenedor(ruta, action.type:sub(1, 7) == "create_")
+    local crear = action.type:sub(1, 7) == "create_"
+    local contenedor = obtenerContenedor(ruta, crear)
 
-    if not existenteContenedor or nombre == "" then
+    if not contenedor or nombre == "" then
         warn("[Roblox AI] Ruta inválida:", ruta, nombre)
         return false
     end
 
-    local existente = existenteContenedor:FindFirstChild(nombre)
+    local existente = contenedor:FindFirstChild(nombre)
 
-    if action.type:sub(1, 7) == "create_" then
+    if crear then
         if existente then
             warn("[Roblox AI] CREATE rechazado: ya existe", existente:GetFullName(), existente.ClassName)
             return false
@@ -375,10 +432,12 @@ local function ejecutarScriptAction(action)
         local nuevo = Instance.new(tipo)
         nuevo.Name = nombre
         nuevo.Source = action.code
-        nuevo.Parent = existenteContenedor
+        nuevo.Parent = contenedor
+
         if nuevo:IsA("Script") or nuevo:IsA("LocalScript") then
             nuevo.Enabled = true
         end
+
         print("[Roblox AI] ✅ CREADO:", nuevo:GetFullName())
         ChangeHistoryService:SetWaypoint("Groq crear " .. nombre)
         return true
@@ -430,7 +489,8 @@ local function ejecutarRemoteAction(action)
 
     local ruta = tostring(action.path or "")
     local nombre = tostring(action.name or "")
-    local contenedor = obtenerContenedor(ruta, action.type:sub(1, 7) == "create_")
+    local crear = action.type:sub(1, 7) == "create_"
+    local contenedor = obtenerContenedor(ruta, crear)
 
     if not contenedor or nombre == "" then
         return false
@@ -438,7 +498,7 @@ local function ejecutarRemoteAction(action)
 
     local existente = contenedor:FindFirstChild(nombre)
 
-    if action.type:sub(1, 7) == "create_" then
+    if crear then
         if existente then
             if existente.ClassName == clase then
                 print("[Roblox AI] ℹ️ Ya existe:", existente:GetFullName())
@@ -477,12 +537,9 @@ local function ejecutarCarpeta(action)
 
     if action.type == "create_folder" then
         local contenedor = obtenerContenedor(ruta, true)
-        if not contenedor then
-            return false
-        end
-        if contenedor:FindFirstChild(nombre) then
-            return true
-        end
+        if not contenedor then return false end
+        if contenedor:FindFirstChild(nombre) then return true end
+
         local carpeta = Instance.new("Folder")
         carpeta.Name = nombre
         carpeta.Parent = contenedor
@@ -493,13 +550,11 @@ local function ejecutarCarpeta(action)
 
     if action.type == "delete_folder" then
         local contenedor = obtenerContenedor(ruta, false)
-        if not contenedor then
-            return false
-        end
+        if not contenedor then return false end
+
         local carpeta = contenedor:FindFirstChild(nombre)
-        if not carpeta or not carpeta:IsA("Folder") then
-            return false
-        end
+        if not carpeta or not carpeta:IsA("Folder") then return false end
+
         carpeta:Destroy()
         print("[Roblox AI] 🗑️ CARPETA ELIMINADA:", ruta .. "/" .. nombre)
         ChangeHistoryService:SetWaypoint("Groq eliminar carpeta " .. nombre)
@@ -509,12 +564,283 @@ local function ejecutarCarpeta(action)
     return false
 end
 
+local function convertirValor(valor)
+    if type(valor) ~= "table" then
+        return valor
+    end
+
+    local tipo = tostring(valor.type or "")
+
+    if tipo == "Vector2" then
+        return Vector2.new(tonumber(valor.x) or 0, tonumber(valor.y) or 0)
+    elseif tipo == "Vector3" then
+        return Vector3.new(tonumber(valor.x) or 0, tonumber(valor.y) or 0, tonumber(valor.z) or 0)
+    elseif tipo == "Color3" then
+        return Color3.new(tonumber(valor.r) or 0, tonumber(valor.g) or 0, tonumber(valor.b) or 0)
+    elseif tipo == "CFrame" then
+        return CFrame.new(
+            tonumber(valor.x) or 0,
+            tonumber(valor.y) or 0,
+            tonumber(valor.z) or 0
+        ) * CFrame.Angles(
+            math.rad(tonumber(valor.rx) or 0),
+            math.rad(tonumber(valor.ry) or 0),
+            math.rad(tonumber(valor.rz) or 0)
+        )
+    elseif tipo == "UDim2" then
+        return UDim2.new(
+            tonumber(valor.xScale) or 0,
+            tonumber(valor.xOffset) or 0,
+            tonumber(valor.yScale) or 0,
+            tonumber(valor.yOffset) or 0
+        )
+    elseif tipo == "BrickColor" then
+        return BrickColor.new(tostring(valor.value or "Medium stone grey"))
+    elseif tipo == "Enum" then
+        local enumNombre = tostring(valor.enum or "")
+        local enumValor = tostring(valor.value or "")
+        local enumObjeto = Enum[enumNombre]
+        if enumObjeto then
+            local enumItem = enumObjeto[enumValor]
+            if enumItem then
+                return enumItem
+            end
+        end
+        return nil
+    end
+
+    return valor
+end
+
+local function propiedadPermitida(nombre)
+    if type(nombre) ~= "string" or nombre == "" then
+        return false
+    end
+
+    return nombre ~= "Parent"
+        and nombre ~= "ClassName"
+        and nombre ~= "Source"
+        and nombre ~= "Archivable"
+end
+
+local function aplicarPropiedad(objeto, nombre, valor)
+    if not objeto or not propiedadPermitida(nombre) then
+        return false
+    end
+
+    local convertido = convertirValor(valor)
+    if convertido == nil and type(valor) == "table" then
+        warn("[Roblox AI] Valor tipado inválido para propiedad:", nombre)
+        return false
+    end
+
+    local ok, errorMensaje = pcall(function()
+        objeto[nombre] = convertido
+    end)
+
+    if not ok then
+        warn(
+            "[Roblox AI] No se pudo cambiar propiedad:",
+            objeto:GetFullName(),
+            nombre,
+            errorMensaje
+        )
+        return false
+    end
+
+    print("[Roblox AI] ⚙️ PROPIEDAD:", objeto:GetFullName(), nombre, "=", tostring(convertido))
+    return true
+end
+
+local function aplicarPropiedades(objeto, propiedades)
+    if type(propiedades) ~= "table" then
+        return 0
+    end
+
+    local total = 0
+    for nombre, valor in pairs(propiedades) do
+        if aplicarPropiedad(objeto, tostring(nombre), valor) then
+            total += 1
+        end
+    end
+    return total
+end
+
+local function claseCoincide(objeto, className)
+    if not className or className == "" then
+        return true
+    end
+    return objeto.ClassName == className
+end
+
+local function ejecutarExtendedAction(action)
+    if type(action) ~= "table" then
+        return false
+    end
+
+    local tipo = tostring(action.type or ""):lower()
+    local ruta = tostring(action.path or "")
+    local nombre = tostring(action.name or "")
+
+    if tipo == "create_instance" then
+        local className = tostring(action.className or "")
+        if not CLASES_CREABLES[className] then
+            warn("[Roblox AI] Clase no permitida para create_instance:", className)
+            return false
+        end
+
+        local contenedor = obtenerContenedor(ruta, true)
+        if not contenedor or nombre == "" then
+            return false
+        end
+
+        local existente = contenedor:FindFirstChild(nombre)
+        if existente then
+            if existente.ClassName == className then
+                aplicarPropiedades(existente, action.properties)
+                print("[Roblox AI] ℹ️ Instancia ya existente:", existente:GetFullName())
+                return true
+            end
+            warn("[Roblox AI] CREATE_INSTANCE rechazado: ya existe otro objeto con ese nombre.")
+            return false
+        end
+
+        local okCrear, nuevo = pcall(function()
+            local instancia = Instance.new(className)
+            instancia.Name = nombre
+            instancia.Parent = contenedor
+            return instancia
+        end)
+
+        if not okCrear or not nuevo then
+            warn("[Roblox AI] No se pudo crear instancia:", className, nuevo)
+            return false
+        end
+
+        local propiedadesAplicadas = aplicarPropiedades(nuevo, action.properties)
+        print("[Roblox AI] ✅ INSTANCIA CREADA:", nuevo:GetFullName(), "(" .. className .. ")", "propiedades:", propiedadesAplicadas)
+        ChangeHistoryService:SetWaypoint("Groq crear instancia " .. nombre)
+        return true
+    end
+
+    local objeto = obtenerInstancia(ruta, nombre)
+    if not objeto then
+        warn("[Roblox AI] Objeto no encontrado:", ruta .. "/" .. nombre)
+        return false
+    end
+
+    if not claseCoincide(objeto, action.className) then
+        warn(
+            "[Roblox AI] ClassName no coincide:",
+            objeto:GetFullName(),
+            "real=", objeto.ClassName,
+            "esperado=", tostring(action.className)
+        )
+        return false
+    end
+
+    if tipo == "set_property" then
+        local ok = aplicarPropiedad(objeto, tostring(action.property or ""), action.value)
+        if ok then ChangeHistoryService:SetWaypoint("Groq propiedad " .. objeto.Name) end
+        return ok
+    end
+
+    if tipo == "set_properties" then
+        local total = aplicarPropiedades(objeto, action.properties)
+        if total > 0 then ChangeHistoryService:SetWaypoint("Groq propiedades " .. objeto.Name) end
+        return total > 0
+    end
+
+    if tipo == "rename_instance" then
+        local nuevoNombre = tostring(action.newName or "")
+        if nuevoNombre == "" or string.find(nuevoNombre, "/", 1, true) or string.find(nuevoNombre, "\\", 1, true) then
+            return false
+        end
+
+        local padre = objeto.Parent
+        if not padre or padre:FindFirstChild(nuevoNombre) then
+            warn("[Roblox AI] RENOMBRAR rechazado: nombre ocupado o sin padre.")
+            return false
+        end
+
+        local anterior = objeto:GetFullName()
+        objeto.Name = nuevoNombre
+        print("[Roblox AI] ✏️ RENOMBRADO:", anterior, "→", objeto:GetFullName())
+        ChangeHistoryService:SetWaypoint("Groq renombrar " .. nuevoNombre)
+        return true
+    end
+
+    if tipo == "move_instance" then
+        local targetPath = tostring(action.targetPath or "")
+        local destino = obtenerContenedor(targetPath, false)
+        if not destino then
+            warn("[Roblox AI] Destino no encontrado:", targetPath)
+            return false
+        end
+
+        if destino == objeto or objeto:IsDescendantOf(destino) then
+            warn("[Roblox AI] MOVE rechazado: destino dentro del propio objeto.")
+            return false
+        end
+
+        if destino:FindFirstChild(objeto.Name) then
+            warn("[Roblox AI] MOVE rechazado: ya existe el mismo nombre en destino.")
+            return false
+        end
+
+        local anterior = objeto:GetFullName()
+        objeto.Parent = destino
+        print("[Roblox AI] 📦 MOVIDO:", anterior, "→", objeto:GetFullName())
+        ChangeHistoryService:SetWaypoint("Groq mover " .. objeto.Name)
+        return true
+    end
+
+    if tipo == "delete_instance" then
+        local fullName = objeto:GetFullName()
+        objeto:Destroy()
+        print("[Roblox AI] 🗑️ INSTANCIA ELIMINADA:", fullName)
+        ChangeHistoryService:SetWaypoint("Groq eliminar " .. nombre)
+        return true
+    end
+
+    warn("[Roblox AI] Acción extendida desconocida:", tipo)
+    return false
+end
+
+local function intentarAccionExtendidaEmpaquetada(action)
+    if type(action) ~= "table" or action.type ~= "update_script" or type(action.code) ~= "string" then
+        return false
+    end
+
+    if string.sub(action.code, 1, #EXTENDED_MARKER) ~= EXTENDED_MARKER then
+        return false
+    end
+
+    local json = string.sub(action.code, #EXTENDED_MARKER + 2)
+    local ok, extended = pcall(function()
+        return HttpService:JSONDecode(json)
+    end)
+
+    if not ok or type(extended) ~= "table" then
+        warn("[Roblox AI] Acción extendida empaquetada inválida.")
+        return true
+    end
+
+    ejecutarExtendedAction(extended)
+    return true
+end
+
 local function ejecutarAccion(action)
     if type(action) ~= "table" then
         return
     end
 
+    if intentarAccionExtendidaEmpaquetada(action) then
+        return
+    end
+
     local tipo = tostring(action.type or "")
+
     if TIPOS_SCRIPT[tipo] then
         ejecutarScriptAction(action)
     elseif TIPOS_REMOTOS[tipo] then
@@ -532,12 +858,14 @@ local function consultarServidor()
     end
 
     consultando = true
+
     local ok, respuesta = pcall(function()
         return HttpService:RequestAsync({
             Url = NEXT_URL,
             Method = "GET"
         })
     end)
+
     consultando = false
 
     if not ok or not respuesta.Success then
@@ -547,6 +875,7 @@ local function consultarServidor()
     local jsonOk, datos = pcall(function()
         return HttpService:JSONDecode(respuesta.Body)
     end)
+
     if not jsonOk or type(datos) ~= "table" or type(datos.actions) ~= "table" then
         return
     end
@@ -559,7 +888,13 @@ local function consultarServidor()
     ChangeHistoryService:SetWaypoint("Antes de cambios Groq")
 
     for _, action in ipairs(datos.actions) do
-        pcall(ejecutarAccion, action)
+        local okAction, errorAction = pcall(function()
+            ejecutarAccion(action)
+        end)
+
+        if not okAction then
+            warn("[Roblox AI] Error ejecutando acción:", errorAction)
+        end
     end
 
     ChangeHistoryService:SetWaypoint("Cambios Groq completados")
@@ -598,11 +933,13 @@ button.Click:Connect(function()
 
     conectado = true
     button:SetActive(true)
+
     print("=================================")
     print("[Roblox AI] 🟢 CONECTADO")
     print("[Roblox AI] Proveedor: Groq")
     print("[Roblox AI] Modelo: Qwen 3.6 27B")
-    print("[Roblox AI] Funciones: scripts + remotes + carpetas")
+    print("[Roblox AI] Funciones: scripts + remotes + instancias + propiedades")
+    print("[Roblox AI] Escaneo: al conectar + cada 5 minutos")
     print("=================================")
 
     escanearProyecto()
