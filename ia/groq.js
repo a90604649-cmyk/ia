@@ -19,6 +19,40 @@ const EXTENDED_ACTIONS = new Set([
     "move_instance"
 ]);
 
+const PROPERTY_NAMES = new Set([
+    "Enabled",
+    "Anchored",
+    "CanCollide",
+    "CanTouch",
+    "CanQuery",
+    "Transparency",
+    "Reflectance",
+    "CastShadow",
+    "Massless",
+    "Locked",
+    "Size",
+    "Position",
+    "Orientation",
+    "CFrame",
+    "Color",
+    "Material",
+    "Shape",
+    "Name",
+    "Visible",
+    "Active",
+    "BackgroundTransparency",
+    "BorderSizePixel",
+    "TextTransparency",
+    "TextSize",
+    "ImageTransparency",
+    "Value",
+    "WalkSpeed",
+    "JumpPower",
+    "AutoRotate",
+    "RequiresHandle",
+    "CanBeDropped"
+]);
+
 const EXTENDED_PROGRAMMER_RULES = [
     "EXTENSIÓN DEL BRIDGE: además de las acciones actuales de scripts, carpetas y remotes, puedes modificar instancias y propiedades de Roblox Studio.",
     "Acciones extendidas permitidas:",
@@ -30,6 +64,10 @@ const EXTENDED_PROGRAMMER_RULES = [
     "- move_instance: {type, path, name, className?, targetPath}",
     "Para objetos existentes identifica siempre path + name + ClassName.",
     "Para crear scripts sigue usando create_script/create_local_script/create_module_script. Para RemoteEvent/RemoteFunction sigue usando sus acciones específicas.",
+    "Para CAMBIAR UNA PROPIEDAD de un objeto existente, SIEMPRE usa set_property o set_properties. NO escribas código Luau para cambiar propiedades.",
+    "EJEMPLO CORRECTO para deshabilitar un LocalScript: {type:'set_property', path:'StarterPlayer/StarterPlayerScripts', name:'MiLocalScript', className:'LocalScript', property:'Enabled', value:false}",
+    "EJEMPLO INCORRECTO: crear/update un script con `script.Enabled = false`, `localScript.Enabled = false` o cualquier asignación equivalente.",
+    "EJEMPLO CORRECTO para habilitar: set_property con property:'Enabled' y value:true.",
     "Para propiedades usa números, booleanos y strings normales o valores tipados: {type:\"Vector3\",x,y,z}, {type:\"Color3\",r,g,b}, {type:\"CFrame\",x,y,z,rx,ry,rz}, {type:\"UDim2\",xScale,xOffset,yScale,yOffset}, {type:\"Enum\",enum:\"Material\",value:\"ForceField\"}.",
     "Enabled, Anchored, CanCollide, Transparency, Position, Size, Color, Material y otras propiedades públicas de Roblox pueden modificarse cuando sean válidas para ese objeto.",
     "Conserva la arquitectura actual y cambia solo lo necesario. Para organizar un sistema puedes combinar create_instance, move_instance, rename_instance y set_property."
@@ -137,6 +175,73 @@ function limpiarMarkdownJson(texto) {
         .trim();
 }
 
+function parsearLiteralSimple(texto) {
+    const valor = String(texto || "").trim();
+    if (valor === "true") return true;
+    if (valor === "false") return false;
+    if (/^-?\d+(\.\d+)?$/.test(valor)) return Number(valor);
+
+    if ((valor.startsWith("\"") && valor.endsWith("\"")) || (valor.startsWith("'") && valor.endsWith("'"))) {
+        return valor.slice(1, -1);
+    }
+
+    return null;
+}
+
+function convertirAsignacionPropiedadEnAccion(action) {
+    if (!action || typeof action !== "object" || !String(action.type || "").startsWith("update_")) {
+        return action;
+    }
+
+    const code = typeof action.code === "string" ? action.code : "";
+    if (!code.trim()) return action;
+
+    const lineas = code
+        .split(/\r?\n/)
+        .map((linea) => linea.trim())
+        .filter((linea) => linea && !linea.startsWith("--") && !linea.startsWith("--["));
+
+    if (lineas.length === 0) return action;
+
+    const propiedades = {};
+
+    for (const linea of lineas) {
+        const match = linea.match(/^(?:[A-Za-z_][A-Za-z0-9_]*)(?:\.[A-Za-z_][A-Za-z0-9_]*)?\.([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+        if (!match) return action;
+
+        const property = match[1];
+        const literal = parsearLiteralSimple(match[2]);
+
+        if (!PROPERTY_NAMES.has(property) || literal === null) {
+            return action;
+        }
+
+        propiedades[property] = literal;
+    }
+
+    if (Object.keys(propiedades).length === 0) return action;
+
+    if (Object.keys(propiedades).length === 1) {
+        const [property, value] = Object.entries(propiedades)[0];
+        return {
+            type: "set_property",
+            path: action.path,
+            name: action.name,
+            className: action.className,
+            property,
+            value
+        };
+    }
+
+    return {
+        type: "set_properties",
+        path: action.path,
+        name: action.name,
+        className: action.className,
+        properties: propiedades
+    };
+}
+
 function empaquetarAccionExtendida(action) {
     const payload = {
         ...action,
@@ -159,10 +264,12 @@ function adaptarAccionesExtendidas(objeto) {
     }
 
     objeto.actions = objeto.actions.map((action) => {
-        if (!action || typeof action !== "object") return action;
-        const type = String(action.type || "").trim().toLowerCase();
-        if (EXTENDED_ACTIONS.has(type)) return empaquetarAccionExtendida(action);
-        return action;
+        const normalizada = convertirAsignacionPropiedadEnAccion(action);
+        if (!normalizada || typeof normalizada !== "object") return action;
+
+        const type = String(normalizada.type || "").trim().toLowerCase();
+        if (EXTENDED_ACTIONS.has(type)) return empaquetarAccionExtendida(normalizada);
+        return normalizada;
     });
 
     return objeto;
@@ -173,7 +280,7 @@ async function enriquecerMensajesProgramador(messages) {
 
     const esProgramador = messages.some((message) =>
         message?.role === "system" &&
-        String(message.content || "").includes("Eres el programador principal de Roblox Studio")
+        String(message.content || "").includes("Eres el programador profesional de Roblox Studio y Luau")
     );
 
     if (!esProgramador) return messages;
@@ -181,7 +288,7 @@ async function enriquecerMensajesProgramador(messages) {
     const enriquecidos = messages.map((message) => ({ ...message }));
     const systemIndex = enriquecidos.findIndex((message) =>
         message?.role === "system" &&
-        String(message.content || "").includes("Eres el programador principal de Roblox Studio")
+        String(message.content || "").includes("Eres el programador profesional de Roblox Studio y Luau")
     );
 
     if (systemIndex >= 0) {
