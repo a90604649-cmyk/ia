@@ -6,7 +6,7 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openai/gpt-5.4-mini";
 const OPENROUTER_MAX_TOKENS = Math.min(
     16384,
-    Math.max(512, Number(process.env.OPENROUTER_MAX_OUTPUT_TOKENS || 6000))
+    Math.max(512, Number(process.env.OPENROUTER_MAX_OUTPUT_TOKENS || 12000))
 );
 const GROQ_SWITCH_THRESHOLD = Math.max(
     0,
@@ -75,6 +75,7 @@ function crearHandoffMessages(messages, reason) {
         "HANDOFF AUTOMÁTICO ENTRE PROVEEDORES.",
         `El proveedor primario Groq/Qwen no puede continuar esta generación (${reason}).`,
         "Continúa la MISMA tarea del usuario desde cero con el contexto recibido.",
+        "No inventes archivos, objetos, rutas ni SOURCE que no aparezcan en el contexto.",
         "Tu salida será ejecutada por un bridge de Roblox Studio.",
         "No expliques el proceso de handoff.",
         "Para programación responde únicamente con el JSON solicitado por el programador principal: reply y actions.",
@@ -165,6 +166,10 @@ async function solicitarOpenRouter(originalBody, reason) {
     }
 }
 
+function esFalloTemporalGroq(status) {
+    return [408, 409, 425, 429, 500, 502, 503, 504].includes(Number(status));
+}
+
 globalThis.fetch = async function providerAwareFetch(url, options = {}) {
     if (!esGroq(url) || !HANDOFF_ENABLED || !tieneClaveOpenRouter()) {
         return realFetch(url, options);
@@ -183,8 +188,8 @@ globalThis.fetch = async function providerAwareFetch(url, options = {}) {
 
     if (!programming) return response;
 
-    if (response.status === 429) {
-        const switched = await solicitarOpenRouter(body, "Groq rate limit 429");
+    if (esFalloTemporalGroq(response.status)) {
+        const switched = await solicitarOpenRouter(body, `Groq HTTP ${response.status}`);
         if (switched) return switched;
         return response;
     }
