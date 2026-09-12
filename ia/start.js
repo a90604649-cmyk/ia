@@ -78,7 +78,7 @@ process.stdin.resume();
 console.log("=================================");
 console.log("🚀 ROBLOX AI BRIDGE");
 console.log("=================================");
-console.log("Groq + Qwen 3.6 27B + OpenRouter fallback");
+console.log("OmniRoute (auto) + Groq directo de respaldo");
 console.log("Project Context: puerto 3001");
 console.log("Roblox AI: puerto 3000");
 console.log("=================================\n");
