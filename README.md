@@ -1,8 +1,8 @@
 # Roblox AI Bridge
 
-Puente Node.js para Roblox Studio con un único proveedor de IA: **Groq + Qwen 3.6 27B**.
+Puente Node.js para Roblox Studio con **OmniRoute** como gateway principal compatible con OpenAI. OmniRoute recibe las peticiones en formato OpenAI y puede seleccionar automáticamente el proveedor/modelo mediante `auto`; el bridge conserva Groq directo como respaldo cuando OmniRoute no responde.
 
-El mismo modelo se usa para conversación, razonamiento de programación, corrección de bugs, creación de sistemas, cambios en varios scripts y generación de animaciones R6.
+El mismo flujo sirve para conversación, razonamiento de programación, corrección de bugs, creación de sistemas, cambios en varios scripts y generación de animaciones R6.
 
 ## Configuración
 
@@ -11,6 +11,15 @@ Usa Node.js 18 o superior.
 Crea `ia/.env` a partir de `ia/.env.example`:
 
 ```env
+OMNIROUTE_API_KEY=tu_clave_de_omniroute
+OMNIROUTE_URL=http://127.0.0.1:20128/v1/chat/completions
+OMNIROUTE_MODEL=auto
+OMNIROUTE_ENABLED=true
+OMNIROUTE_TIMEOUT_MS=300000
+OMNIROUTE_PROGRESS=true
+OMNIROUTE_FALLBACK_TO_GROQ=true
+
+# Opcional: respaldo directo si OmniRoute está apagado o no responde.
 GROQ_API_KEY=tu_clave_de_groq
 GROQ_API_KEYS=
 GROQ_MODEL=qwen/qwen3.6-27b
@@ -20,6 +29,10 @@ GROQ_MAX_OUTPUT_TOKENS=16384
 GROQ_TIMEOUT_MS=300000
 PROJECT_CONTEXT_PORT=3001
 ```
+
+La `OMNIROUTE_API_KEY` es la clave que OmniRoute genera en **Dashboard → Endpoints / Claves registradas**. No se debe guardar la clave real en Git.
+
+Por defecto OmniRoute se espera en `http://127.0.0.1:20128/v1/chat/completions`, que corresponde al API local de OmniRoute.
 
 No subas `.env` al repositorio.
 
@@ -36,9 +49,11 @@ El servidor queda en `http://127.0.0.1:3000` y el contexto del proyecto en `http
 
 ## Flujo de programación
 
-Usuario → Groq/Qwen analiza y razona → identifica los objetos y archivos reales del Project Context → genera los cambios → el bridge valida y aplica las acciones en Roblox Studio.
+Usuario → Roblox AI Bridge → **OmniRoute (`model=auto`)** → proveedor/modelo seleccionado por OmniRoute → análisis del proyecto real → cambios → validación → Roblox Studio.
 
-### Scripts
+Si OmniRoute no responde y `OMNIROUTE_FALLBACK_TO_GROQ=true`, el bridge conserva el flujo anterior y envía la petición directamente a Groq.
+
+## Scripts
 
 - `create_script`
 - `create_local_script`
@@ -50,7 +65,7 @@ Usuario → Groq/Qwen analiza y razona → identifica los objetos y archivos rea
 - `delete_local_script`
 - `delete_module_script`
 
-### Remotes y carpetas
+## Remotes y carpetas
 
 - `create_remote_event`
 - `create_remote_function`
@@ -59,7 +74,7 @@ Usuario → Groq/Qwen analiza y razona → identifica los objetos y archivos rea
 - `create_folder`
 - `delete_folder`
 
-### Instancias y propiedades
+## Instancias y propiedades
 
 El bridge también acepta acciones extendidas para trabajar con objetos de Roblox sin romper el formato anterior:
 
@@ -87,7 +102,7 @@ Cuando se modifica un objeto existente se comprueba `path + name + ClassName` pa
 
 ## Project Context
 
-El plugin escanea `Script`, `LocalScript`, `ModuleScript` y un catálogo limitado de objetos importantes para que Qwen conozca las rutas reales del proyecto. El escaneo inicial ocurre al conectar y el automático está limitado a una actualización cada 5 minutos.
+El plugin escanea `Script`, `LocalScript`, `ModuleScript` y un catálogo limitado de objetos importantes para que la IA conozca las rutas reales del proyecto. El escaneo inicial ocurre al conectar y el automático está limitado a una actualización cada 5 minutos.
 
 ## Animaciones R6
 
@@ -96,7 +111,7 @@ El pipeline de animaciones R6 conserva la calibración y memoria existentes del 
 ## Endpoints
 
 - `GET /` estado general del bridge.
-- `GET /health` estado de configuración de Groq.
+- `GET /health` estado de configuración del proveedor.
 - `POST /r6-calibration` recibe la calibración R6.
 - `GET /r6-calibration` devuelve la calibración actual.
 - `POST /selected-script` recibe el script seleccionado desde Roblox Studio.
