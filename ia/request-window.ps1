@@ -30,15 +30,15 @@ $hint.AutoSize = $true
 $hint.Location = New-Object System.Drawing.Point(20, 48)
 $form.Controls.Add($hint)
 
-$input = New-Object System.Windows.Forms.TextBox
-$input.Multiline = $true
-$input.ScrollBars = "Vertical"
-$input.AcceptsReturn = $true
-$input.Font = New-Object System.Drawing.Font("Segoe UI", 11)
-$input.Location = New-Object System.Drawing.Point(20, 78)
-$input.Size = New-Object System.Drawing.Size(564, 125)
-$input.Anchor = "Top,Bottom,Left,Right"
-$form.Controls.Add($input)
+$requestBox = New-Object System.Windows.Forms.TextBox
+$requestBox.Multiline = $true
+$requestBox.ScrollBars = "Vertical"
+$requestBox.AcceptsReturn = $true
+$requestBox.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+$requestBox.Location = New-Object System.Drawing.Point(20, 78)
+$requestBox.Size = New-Object System.Drawing.Size(564, 125)
+$requestBox.Anchor = "Top,Bottom,Left,Right"
+$form.Controls.Add($requestBox)
 
 $send = New-Object System.Windows.Forms.Button
 $send.Text = "Enviar"
@@ -57,7 +57,7 @@ $status.Anchor = "Bottom,Left"
 $form.Controls.Add($status)
 
 function Send-Request {
-    $message = $input.Text.Trim()
+    $message = $requestBox.Text.Trim()
     if ([string]::IsNullOrWhiteSpace($message)) {
         $status.Text = "Escribe una peticion primero."
         $status.ForeColor = [System.Drawing.Color]::DarkOrange
@@ -74,7 +74,7 @@ function Send-Request {
             -TimeoutSec 10
 
         if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
-            $input.Clear()
+            $requestBox.Clear()
             $status.Text = "Peticion enviada."
             $status.ForeColor = [System.Drawing.Color]::ForestGreen
         } else {
@@ -98,7 +98,7 @@ $send.Add_Click({ Send-Request })
 $form.AcceptButton = $send
 
 $form.Add_Shown({
-    $input.Focus()
+    $requestBox.Focus()
 })
 
 [void]$form.ShowDialog()
