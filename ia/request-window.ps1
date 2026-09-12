@@ -8,7 +8,7 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Roblox AI — Escribe tu petición"
+$form.Text = "Roblox AI - Escribe tu peticion"
 $form.StartPosition = "CenterScreen"
 $form.Size = New-Object System.Drawing.Size(620, 300)
 $form.MinimumSize = New-Object System.Drawing.Size(500, 250)
@@ -17,14 +17,14 @@ $form.MaximizeBox = $true
 $form.MinimizeBox = $true
 
 $title = New-Object System.Windows.Forms.Label
-$title.Text = "Escribe tu petición"
+$title.Text = "Escribe tu peticion"
 $title.Font = New-Object System.Drawing.Font("Segoe UI", 15, [System.Drawing.FontStyle]::Bold)
 $title.AutoSize = $true
 $title.Location = New-Object System.Drawing.Point(18, 15)
 $form.Controls.Add($title)
 
 $hint = New-Object System.Windows.Forms.Label
-$hint.Text = "El Bridge seguirá mostrando errores y logs en la consola."
+$hint.Text = "El Bridge seguira mostrando errores y logs en la consola."
 $hint.ForeColor = [System.Drawing.Color]::DimGray
 $hint.AutoSize = $true
 $hint.Location = New-Object System.Drawing.Point(20, 48)
@@ -59,7 +59,7 @@ $form.Controls.Add($status)
 function Send-Request {
     $message = $input.Text.Trim()
     if ([string]::IsNullOrWhiteSpace($message)) {
-        $status.Text = "Escribe una petición primero."
+        $status.Text = "Escribe una peticion primero."
         $status.ForeColor = [System.Drawing.Color]::DarkOrange
         return
     }
@@ -75,10 +75,10 @@ function Send-Request {
 
         if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
             $input.Clear()
-            $status.Text = "Petición enviada."
+            $status.Text = "Peticion enviada."
             $status.ForeColor = [System.Drawing.Color]::ForestGreen
         } else {
-            $status.Text = "El Bridge devolvió HTTP $($response.StatusCode)."
+            $status.Text = "El Bridge devolvio HTTP $($response.StatusCode)."
             $status.ForeColor = [System.Drawing.Color]::Firebrick
         }
     }
@@ -86,7 +86,7 @@ function Send-Request {
         $status.Text = "No se pudo conectar con el Bridge."
         $status.ForeColor = [System.Drawing.Color]::Firebrick
         [System.Windows.Forms.MessageBox]::Show(
-            "No se pudo enviar la petición.`r`n`r`n$($_.Exception.Message)",
+            "No se pudo enviar la peticion.`r`n`r`n$($_.Exception.Message)",
             "Roblox AI Bridge",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
