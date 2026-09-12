@@ -3,10 +3,17 @@ const realFetch = globalThis.fetch.bind(globalThis);
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "openai/gpt-5.4-mini";
+const OPENROUTER_MODELS = String(
+    process.env.OPENROUTER_MODELS ||
+    "poolside/laguna-s-2.1:free,cohere/north-mini-code:free,nex-agi/nex-n2.5-pro:free"
+)
+    .split(",")
+    .map((model) => model.trim())
+    .filter(Boolean);
+
 const OPENROUTER_MAX_TOKENS = Math.min(
     16384,
-    Math.max(512, Number(process.env.OPENROUTER_MAX_OUTPUT_TOKENS || 2200))
+    Math.max(512, Number(process.env.OPENROUTER_MAX_OUTPUT_TOKENS || 8192))
 );
 const GROQ_SWITCH_THRESHOLD = Math.max(
     0,
@@ -17,10 +24,18 @@ const GROQ_INPUT_SOFT_LIMIT = Math.max(
     Number(process.env.GROQ_INPUT_SOFT_LIMIT || 6200)
 );
 const HANDOFF_ENABLED = String(process.env.OPENROUTER_HANDOFF || "true").toLowerCase() !== "false";
+const OPENROUTER_MAX_ATTEMPTS = Math.max(
+    1,
+    Math.min(
+        OPENROUTER_MODELS.length || 1,
+        Number(process.env.OPENROUTER_MAX_ATTEMPTS || OPENROUTER_MODELS.length || 1)
+    )
+);
 
 let groqRemainingTokens = null;
 let groqResetAt = null;
 let openRouterBusy = false;
+let openRouterStartIndex = 0;
 
 function tieneClaveOpenRouter() {
     return Boolean(String(process.env.OPENROUTER_API_KEY || "").trim());
@@ -101,10 +116,10 @@ function crearHandoffMessages(messages, reason) {
     ];
 }
 
-function prepararBodyOpenRouter(originalBody, reason, maxTokens = OPENROUTER_MAX_TOKENS) {
+function prepararBodyOpenRouter(originalBody, reason, model, maxTokens = OPENROUTER_MAX_TOKENS) {
     const body = {
         ...(originalBody || {}),
-        model: OPENROUTER_MODEL,
+        model,
         messages: crearHandoffMessages(originalBody?.messages, reason),
         max_tokens: Math.max(512, Math.min(16384, Number(maxTokens) || OPENROUTER_MAX_TOKENS)),
         stream: false
@@ -127,6 +142,20 @@ function obtenerMaxTokensPermitidosDesde402(text) {
     return Math.max(512, Math.min(16384, value - 100));
 }
 
+function esErrorReintentableOpenRouter(status) {
+    return [408, 409, 425, 429, 500, 502, 503, 504].includes(Number(status));
+}
+
+function obtenerModelosEnOrden() {
+    if (!OPENROUTER_MODELS.length) return [];
+
+    const start = openRouterStartIndex % OPENROUTER_MODELS.length;
+    return Array.from(
+        { length: Math.min(OPENROUTER_MAX_ATTEMPTS, OPENROUTER_MODELS.length) },
+        (_, offset) => OPENROUTER_MODELS[(start + offset) % OPENROUTER_MODELS.length]
+    );
+}
+
 async function solicitarOpenRouter(originalBody, reason) {
     if (!tieneClaveOpenRouter()) return null;
     if (openRouterBusy) return null;
@@ -134,76 +163,97 @@ async function solicitarOpenRouter(originalBody, reason) {
     openRouterBusy = true;
 
     try {
-        let maxTokens = OPENROUTER_MAX_TOKENS;
+        const modelos = obtenerModelosEnOrden();
+        let ultimoError = null;
 
-        for (let intento = 1; intento <= 2; intento++) {
-            const requestBody = prepararBodyOpenRouter(originalBody, reason, maxTokens);
+        for (const model of modelos) {
+            let maxTokens = OPENROUTER_MAX_TOKENS;
 
-            console.log(
-                `🔀 Handoff → OpenRouter/${OPENROUTER_MODEL} (${reason}) · max_tokens=${requestBody.max_tokens}`
-            );
+            for (let intento = 1; intento <= 2; intento++) {
+                const requestBody = prepararBodyOpenRouter(originalBody, reason, model, maxTokens);
 
-            const headers = {
-                Authorization: `Bearer ${String(process.env.OPENROUTER_API_KEY).trim()}`,
-                "Content-Type": "application/json",
-                Accept: "application/json"
-            };
+                console.log(
+                    `🔀 Handoff → OpenRouter/${model} (${reason}) · max_tokens=${requestBody.max_tokens}`
+                );
 
-            const referer = String(process.env.OPENROUTER_SITE_URL || "").trim();
-            const title = String(process.env.OPENROUTER_APP_NAME || "Roblox AI Bridge").trim();
-            if (referer) headers["HTTP-Referer"] = referer;
-            if (title) headers["X-Title"] = title;
+                const headers = {
+                    Authorization: `Bearer ${String(process.env.OPENROUTER_API_KEY).trim()}`,
+                    "Content-Type": "application/json",
+                    Accept: "application/json"
+                };
 
-            const response = await realFetch(OPENROUTER_URL, {
-                method: "POST",
-                headers,
-                body: JSON.stringify(requestBody)
-            });
+                const referer = String(process.env.OPENROUTER_SITE_URL || "").trim();
+                const title = String(process.env.OPENROUTER_APP_NAME || "Roblox AI Bridge").trim();
+                if (referer) headers["HTTP-Referer"] = referer;
+                if (title) headers["X-Title"] = title;
 
-            const text = await response.text();
+                try {
+                    const response = await realFetch(OPENROUTER_URL, {
+                        method: "POST",
+                        headers,
+                        body: JSON.stringify(requestBody)
+                    });
 
-            if (response.status === 402 && intento === 1) {
-                const affordable = obtenerMaxTokensPermitidosDesde402(text);
-                if (affordable != null && affordable < maxTokens) {
-                    console.warn(
-                        `⚠️ OpenRouter limita el saldo disponible. Reduciendo max_tokens ${maxTokens} → ${affordable} y reintentando.`
-                    );
-                    maxTokens = affordable;
-                    continue;
+                    const text = await response.text();
+
+                    if (response.status === 402 && intento === 1) {
+                        const affordable = obtenerMaxTokensPermitidosDesde402(text);
+                        if (affordable != null && affordable < maxTokens) {
+                            console.warn(
+                                `⚠️ OpenRouter limita el saldo disponible para ${model}. Reduciendo max_tokens ${maxTokens} → ${affordable}.`
+                            );
+                            maxTokens = affordable;
+                            continue;
+                        }
+                    }
+
+                    if (!response.ok) {
+                        ultimoError = `HTTP ${response.status}`;
+                        console.warn(`⚠️ OpenRouter/${model} ${response.status}: ${text.slice(0, 800)}`);
+                        break;
+                    }
+
+                    let data = null;
+                    try {
+                        data = JSON.parse(text);
+                    } catch {
+                        data = null;
+                    }
+
+                    const content = data?.choices?.[0]?.message?.content;
+                    if (typeof content !== "string" || !content.trim()) {
+                        ultimoError = "respuesta vacía";
+                        console.warn(`⚠️ OpenRouter/${model} no devolvió contenido ejecutable.`);
+                        break;
+                    }
+
+                    const resolvedModel = data?.model || model;
+                    console.log(`✅ OpenRouter respondió con ${resolvedModel}.`);
+
+                    if (OPENROUTER_MODELS.length > 1) {
+                        const successfulIndex = OPENROUTER_MODELS.indexOf(model);
+                        if (successfulIndex >= 0) openRouterStartIndex = successfulIndex;
+                    }
+
+                    return new Response(text, {
+                        status: 200,
+                        statusText: "OK",
+                        headers: {
+                            "Content-Type": "application/json"
+                        }
+                    });
+                } catch (error) {
+                    ultimoError = error instanceof Error ? error.message : String(error);
+                    console.warn(`⚠️ Error en OpenRouter/${model}:`, ultimoError);
+                    break;
                 }
             }
-
-            if (!response.ok) {
-                console.warn(`⚠️ OpenRouter ${response.status}: ${text.slice(0, 1000)}`);
-                return null;
-            }
-
-            let data = null;
-            try {
-                data = JSON.parse(text);
-            } catch {
-                data = null;
-            }
-
-            const content = data?.choices?.[0]?.message?.content;
-            if (typeof content !== "string" || !content.trim()) {
-                console.warn("⚠️ OpenRouter no devolvió contenido ejecutable.");
-                return null;
-            }
-
-            console.log(`✅ OpenRouter respondió con ${data?.model || OPENROUTER_MODEL}.`);
-            return new Response(text, {
-                status: 200,
-                statusText: "OK",
-                headers: {
-                    "Content-Type": "application/json"
-                }
-            });
         }
 
-        return null;
-    } catch (error) {
-        console.warn("⚠️ Error en OpenRouter:", error instanceof Error ? error.message : String(error));
+        if (ultimoError) {
+            console.warn(`❌ Todos los modelos de OpenRouter fallaron. Último error: ${ultimoError}`);
+        }
+
         return null;
     } finally {
         openRouterBusy = false;
@@ -275,5 +325,5 @@ globalThis.fetch = async function providerAwareFetch(url, options = {}) {
 };
 
 console.log(
-    `🔀 Provider Router: input>${GROQ_INPUT_SOFT_LIMIT}t / Groq ${GROQ_SWITCH_THRESHOLD}t → OpenRouter ${OPENROUTER_MODEL} (${OPENROUTER_MAX_TOKENS}t máx.)`
+    `🔀 Provider Router: input>${GROQ_INPUT_SOFT_LIMIT}t / Groq ${GROQ_SWITCH_THRESHOLD}t → OpenRouter [${OPENROUTER_MODELS.join(" → ")}] (${OPENROUTER_MAX_TOKENS}t máx.)`
 );
