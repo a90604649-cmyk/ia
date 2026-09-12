@@ -10,7 +10,7 @@ local PROJECT_SCAN_URL = "http://127.0.0.1:3001/project-scan"
 local toolbar = plugin:CreateToolbar("Roblox AI")
 local button = toolbar:CreateButton(
     "Roblox AI",
-    "Conectar Roblox Studio con Groq + Qwen",
+    "Conectar Roblox Studio con OmniRoute",
     ""
 )
 button.ClickableWhenViewportHidden = true
@@ -363,7 +363,7 @@ local function comprobarServidor()
     end)
 
     if not ok or not respuesta.Success then
-        warn("[Roblox AI] No se pudo conectar al servidor Groq:", ok and respuesta.Body or respuesta)
+        warn("[Roblox AI] No se pudo conectar al servidor OmniRoute:", ok and respuesta.Body or respuesta)
         return false
     end
 
@@ -376,12 +376,12 @@ local function comprobarServidor()
         return false
     end
 
-    if datos.ok ~= true or datos.groqConfigured ~= true then
-        warn("[Roblox AI] Groq no está configurado.")
+    if datos.ok ~= true then
+        warn("[Roblox AI] OmniRoute no está disponible.")
         return false
     end
 
-    print("[Roblox AI] ✅ Groq:", tostring(datos.model))
+    print("[Roblox AI] ✅ OmniRoute:", tostring(datos.model))
     print("[Roblox AI] 🧠 Reasoning:", tostring(datos.reasoningEffort))
     return true
 end
@@ -439,7 +439,7 @@ local function ejecutarScriptAction(action)
         end
 
         print("[Roblox AI] ✅ CREADO:", nuevo:GetFullName())
-        ChangeHistoryService:SetWaypoint("Groq crear " .. nombre)
+        ChangeHistoryService:SetWaypoint("OmniRoute crear " .. nombre)
         return true
     end
 
@@ -458,7 +458,7 @@ local function ejecutarScriptAction(action)
                 existente.Enabled = true
             end
             print("[Roblox AI] ✏️ ACTUALIZADO:", existente:GetFullName())
-            ChangeHistoryService:SetWaypoint("Groq actualizar " .. nombre)
+            ChangeHistoryService:SetWaypoint("OmniRoute actualizar " .. nombre)
             return true
         end
 
@@ -474,7 +474,7 @@ local function ejecutarScriptAction(action)
         local fullName = existente:GetFullName()
         existente:Destroy()
         print("[Roblox AI] 🗑️ ELIMINADO:", fullName)
-        ChangeHistoryService:SetWaypoint("Groq eliminar " .. nombre)
+        ChangeHistoryService:SetWaypoint("OmniRoute eliminar " .. nombre)
         return true
     end
 
@@ -512,7 +512,7 @@ local function ejecutarRemoteAction(action)
         nuevo.Name = nombre
         nuevo.Parent = contenedor
         print("[Roblox AI] ✅ CREADO:", nuevo:GetFullName(), "(" .. clase .. ")")
-        ChangeHistoryService:SetWaypoint("Groq crear " .. nombre)
+        ChangeHistoryService:SetWaypoint("OmniRoute crear " .. nombre)
         return true
     end
 
@@ -523,7 +523,7 @@ local function ejecutarRemoteAction(action)
 
     existente:Destroy()
     print("[Roblox AI] 🗑️ REMOTO ELIMINADO:", ruta .. "/" .. nombre)
-    ChangeHistoryService:SetWaypoint("Groq eliminar " .. nombre)
+    ChangeHistoryService:SetWaypoint("OmniRoute eliminar " .. nombre)
     return true
 end
 
@@ -544,7 +544,7 @@ local function ejecutarCarpeta(action)
         carpeta.Name = nombre
         carpeta.Parent = contenedor
         print("[Roblox AI] 📁 CARPETA CREADA:", carpeta:GetFullName())
-        ChangeHistoryService:SetWaypoint("Groq crear carpeta " .. nombre)
+        ChangeHistoryService:SetWaypoint("OmniRoute crear carpeta " .. nombre)
         return true
     end
 
@@ -557,7 +557,7 @@ local function ejecutarCarpeta(action)
 
         carpeta:Destroy()
         print("[Roblox AI] 🗑️ CARPETA ELIMINADA:", ruta .. "/" .. nombre)
-        ChangeHistoryService:SetWaypoint("Groq eliminar carpeta " .. nombre)
+        ChangeHistoryService:SetWaypoint("OmniRoute eliminar carpeta " .. nombre)
         return true
     end
 
@@ -719,7 +719,7 @@ local function ejecutarExtendedAction(action)
 
         local propiedadesAplicadas = aplicarPropiedades(nuevo, action.properties)
         print("[Roblox AI] ✅ INSTANCIA CREADA:", nuevo:GetFullName(), "(" .. className .. ")", "propiedades:", propiedadesAplicadas)
-        ChangeHistoryService:SetWaypoint("Groq crear instancia " .. nombre)
+        ChangeHistoryService:SetWaypoint("OmniRoute crear instancia " .. nombre)
         return true
     end
 
@@ -741,13 +741,13 @@ local function ejecutarExtendedAction(action)
 
     if tipo == "set_property" then
         local ok = aplicarPropiedad(objeto, tostring(action.property or ""), action.value)
-        if ok then ChangeHistoryService:SetWaypoint("Groq propiedad " .. objeto.Name) end
+        if ok then ChangeHistoryService:SetWaypoint("OmniRoute propiedad " .. objeto.Name) end
         return ok
     end
 
     if tipo == "set_properties" then
         local total = aplicarPropiedades(objeto, action.properties)
-        if total > 0 then ChangeHistoryService:SetWaypoint("Groq propiedades " .. objeto.Name) end
+        if total > 0 then ChangeHistoryService:SetWaypoint("OmniRoute propiedades " .. objeto.Name) end
         return total > 0
     end
 
@@ -766,7 +766,7 @@ local function ejecutarExtendedAction(action)
         local anterior = objeto:GetFullName()
         objeto.Name = nuevoNombre
         print("[Roblox AI] ✏️ RENOMBRADO:", anterior, "→", objeto:GetFullName())
-        ChangeHistoryService:SetWaypoint("Groq renombrar " .. nuevoNombre)
+        ChangeHistoryService:SetWaypoint("OmniRoute renombrar " .. nuevoNombre)
         return true
     end
 
@@ -791,7 +791,7 @@ local function ejecutarExtendedAction(action)
         local anterior = objeto:GetFullName()
         objeto.Parent = destino
         print("[Roblox AI] 📦 MOVIDO:", anterior, "→", objeto:GetFullName())
-        ChangeHistoryService:SetWaypoint("Groq mover " .. objeto.Name)
+        ChangeHistoryService:SetWaypoint("OmniRoute mover " .. objeto.Name)
         return true
     end
 
@@ -799,7 +799,7 @@ local function ejecutarExtendedAction(action)
         local fullName = objeto:GetFullName()
         objeto:Destroy()
         print("[Roblox AI] 🗑️ INSTANCIA ELIMINADA:", fullName)
-        ChangeHistoryService:SetWaypoint("Groq eliminar " .. nombre)
+        ChangeHistoryService:SetWaypoint("OmniRoute eliminar " .. nombre)
         return true
     end
 
@@ -885,7 +885,7 @@ local function consultarServidor()
     end
 
     print("[Roblox AI] 📥 Acciones Groq:", #datos.actions)
-    ChangeHistoryService:SetWaypoint("Antes de cambios Groq")
+    ChangeHistoryService:SetWaypoint("Antes de cambios OmniRoute")
 
     for _, action in ipairs(datos.actions) do
         local okAction, errorAction = pcall(function()
@@ -897,7 +897,7 @@ local function consultarServidor()
         end
     end
 
-    ChangeHistoryService:SetWaypoint("Cambios Groq completados")
+    ChangeHistoryService:SetWaypoint("Cambios OmniRoute completados")
     escanearProyecto()
 end
 
@@ -936,8 +936,8 @@ button.Click:Connect(function()
 
     print("=================================")
     print("[Roblox AI] 🟢 CONECTADO")
-    print("[Roblox AI] Proveedor: Groq")
-    print("[Roblox AI] Modelo: Qwen 3.6 27B")
+    print("[Roblox AI] Proveedor: OmniRoute")
+    print("[Roblox AI] Modelo: auto")
     print("[Roblox AI] Funciones: scripts + remotes + instancias + propiedades")
     print("[Roblox AI] Escaneo: al conectar + cada 5 minutos")
     print("=================================")
