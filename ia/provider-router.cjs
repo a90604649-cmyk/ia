@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const realFetch = globalThis.fetch.bind(globalThis);
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
@@ -36,7 +38,7 @@ function prepararBodyOmniRoute(originalBody) {
         stream: false
     };
 
-    // El Bridge ya controla el formato de salida; OmniRoute se encarga del proveedor/modelo.
+    // OmniRoute es compatible con Chat Completions y se encarga del proveedor/modelo.
     delete body.reasoning_format;
     delete body.reasoning_effort;
 
@@ -81,9 +83,7 @@ async function solicitarOmniRoute(originalBody) {
         const text = await response.text();
 
         if (!response.ok) {
-            console.warn(
-                `⚠️ OmniRoute HTTP ${response.status}: ${text.slice(0, 800)}`
-            );
+            console.warn(`⚠️ OmniRoute HTTP ${response.status}: ${text.slice(0, 800)}`);
             return null;
         }
 
@@ -130,10 +130,21 @@ globalThis.fetch = async function providerAwareFetch(url, options = {}) {
 
     if (switched) return switched;
 
-    if (OMNIROUTE_FALLBACK_TO_GROQ) {
-        console.warn("↩️ OmniRoute no respondió; usando Groq directo como respaldo.");
+    if (!OMNIROUTE_FALLBACK_TO_GROQ) {
+        return new Response(
+            JSON.stringify({
+                error: {
+                    message: "OmniRoute no respondió y el respaldo directo a Groq está desactivado."
+                }
+            }),
+            {
+                status: 503,
+                headers: { "Content-Type": "application/json" }
+            }
+        );
     }
 
+    console.warn("↩️ OmniRoute no respondió; usando Groq directo como respaldo.");
     return realFetch(url, options);
 };
 
