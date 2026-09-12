@@ -13,7 +13,7 @@ function iniciar(nombre, archivo, reintento = 0) {
 
     console.log(`[${nombre}] iniciando ${archivo}...`);
 
-    const proceso = spawn(process.execPath, ["--require", "./provider-router.cjs", archivo], {
+    const proceso = spawn(process.execPath, [archivo], {
         stdio: "inherit",
         env: process.env,
         cwd: process.cwd()
@@ -35,7 +35,6 @@ function iniciar(nombre, archivo, reintento = 0) {
 
         procesos.delete(nombre);
 
-        // Reinicio automático para evitar que un cierre inesperado deje el bridge inutilizable.
         const espera = Math.min(5000, 1000 + reintento * 1000);
         console.log(`[${nombre}] reiniciando en ${espera} ms...`);
 
@@ -72,13 +71,12 @@ for (const [nombre, archivo] of CONFIG) {
     iniciar(nombre, archivo);
 }
 
-// Mantiene vivo el proceso supervisor aunque un hijo termine inmediatamente.
 process.stdin.resume();
 
 console.log("=================================");
 console.log("🚀 ROBLOX AI BRIDGE");
 console.log("=================================");
-console.log("OmniRoute (auto) + Groq directo de respaldo");
+console.log("OmniRoute (auto) — proveedor único");
 console.log("Project Context: puerto 3001");
 console.log("Roblox AI: puerto 3000");
 console.log("=================================\n");
